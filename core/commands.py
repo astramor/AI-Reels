@@ -45,6 +45,54 @@ def run_command(
     text: bool = True
 ) -> CommandResult:
     """
+    Führt ein Shell-Kommando sicher aus und registriert es in der ProcessRegistry.
+    """
+    cmd_str = " ".join(shlex.quote(str(c)) for c in command)
+    logger.debug(f"Executing command: {cmd_str}")
+
+    try:
+        # Wir nutzen Popen statt run, um den Prozess während der Ausführung tracken zu können
+        proc = subprocess.Popen(
+            [str(c) for c in command],
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE if capture_output else None,
+            stderr=subprocess.PIPE if capture_output else None,
+            text=text,
+            start_new_session=True # Prozessgruppe trennen für besseres Signal-Handling
+        )
+        
+        ProcessRegistry.register(proc)
+        
+        try:
+            stdout, stderr = proc.communicate()
+        finally:
+            ProcessRegistry.unregister(proc)
+
+        result = CommandResult(
+            command=[str(c) for c in command],
+            returncode=proc.returncode,
+            stdout=stdout if capture_output else "",
+            stderr=stderr if capture_output else ""
+        )
+
+        if check and not result.success:
+            raise CommandError(result)
+
+        return result
+
+    except Exception as e:
+        if isinstance(e, CommandError):
+            raise e
+        
+        # Für andere Fehler (z.B. Datei nicht gefunden)
+        logger.error(f"Failed to execute command '{cmd_str}': {e}")
+        raise
+ True,
+    capture_output: bool = True,
+    text: bool = True
+) -> CommandResult:
+    """
     Führt ein Shell-Kommando sicher aus.
     Kein shell=True für maximale Sicherheit.
     """

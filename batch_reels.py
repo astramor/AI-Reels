@@ -1,16 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import argparse, os, sys, subprocess, shlex, json, yaml, shutil, re
+import argparse, os, sys, subprocess, shlex, json, yaml, shutil, re, signal
 from pathlib import Path
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import srt
 from core.time_utils import hms_to_seconds, parse_time_to_seconds, seconds_to_hms
 from domains.highlights.parser import HighlightParser
-from core.commands import run_command
+from core.commands import run_command, ProcessRegistry
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".mp3", ".wav", ".webm"}
+
+
+def signal_handler(sig, frame):
+    """
+    Abbruch-Handler für SIGINT und SIGTERM.
+    Beendet alle laufenden Subprozesse.
+    """
+    signame = signal.Signals(sig).name
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🛑 Abbruch durch {signame} empfangen...")
+    ProcessRegistry.terminate_all()
+    print("👋 Programm beendet.")
+    sys.exit(0)
+
+
+# Registriere Handler
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 
 def log(msg: str):
