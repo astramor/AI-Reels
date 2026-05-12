@@ -89,27 +89,51 @@ class FFmpegRenderer:
         target_h: int,
         track: List[Tuple[float, float, float]],
     ) -> str:
+        """
+        Generiert einen FFmpeg-Filter für dynamisches Tracking (Crop).
+        Optimiert durch Keyframe-Limiter und effiziente Interpolation.
+        """
         if not track:
             return self.cover_scale_crop_filter(target_w, target_h)
+
         s = max(target_w / src_w, target_h / src_h)
         sw = int(round(src_w * s))
         sh = int(round(src_h * s))
 
-        def lerp(keys):
+        # 1. Keyframes einschränken (FFmpeg Filter-Limit vermeiden)
+        # Wir nehmen maximal 20 Keyframes, um O(N) Overhead zu verhindern.
+        max_keys = 20
+        if len(track) > max_keys:
+            step = len(track) / (max_keys - 1)
+            indices = [int(i * step) for i in range(max_keys - 1)] + [len(track) - 1]
+            track = [track[i] for i in indices]
+
+        def lerp_ffmpeg(keys: List[Tuple[float, int]]) -> str:
             if not keys:
                 return "0"
             if len(keys) == 1:
-                return str(int(round(keys[0][1])))
-            expr = ""
-            for i in range(len(keys) - 1):
-                t0, v0 = keys[i]
-                t1, v1 = keys[i + 1]
-                dt = max(1e-3, t1 - t0)
-                cond = f"lt(t,{t1})"
-                body = f"(({v0}) + ({v1}-{v0})*((t-({t0}))/{dt}))"
-                expr = f"if({cond},{body}," if i == 0 else expr + f"if({cond},{body},"
-            expr += f"{keys[-1][1]}" + (")" * (len(keys) - 1))
-            return expr
+                return str(keys[0][1])
+
+            # Effiziente Interpolations-Kette (balancierter Baum statt tiefer Verschachtelung)
+            def build_tree(k_list):
+                if len(k_list) == 1:
+                    return str(k_list[0][1])
+                mid = len(k_list) // 2
+                left = k_list[:mid]
+                right = k_list[mid:]
+                # Wenn t < t_mid, dann linker Ast, sonst rechter
+                t_mid = right[0][0]
+                
+                if len(left) == 1 and len(right) == 1:
+                    # Direkte lineare Interpolation zwischen zwei Punkten
+                    t0, v0 = left[0]
+                    t1, v1 = right[0]
+                    dt = max(1e-3, t1 - t0)
+                    return f"if(lt(t,{t1}),{v0}+({v1}-{v0})*(t-{t0})/{dt},{v1})"
+                
+                return f"if(lt(t,{t_mid}),{build_tree(left)},{build_tree(right)})"
+
+            return build_tree(keys)
 
         key_x, key_y = [], []
         for t, cx, cy in track:
@@ -120,8 +144,14 @@ class FFmpegRenderer:
             )
             key_x.append((round(t, 3), x))
             key_y.append((round(t, 3), y))
-        x_clamped = f"max(min({lerp(key_x)},{max(0, sw - target_w)}),0)"
-        y_clamped = f"max(min({lerp(key_y)},{max(0, sh - target_h)}),0)"
+
+        x_expr = lerp_ffmpeg(key_x)
+        y_expr = lerp_ffmpeg(key_y)
+        
+        # Clamp-Sicherung
+        x_clamped = f"max(min({x_expr},{max(0, sw - target_w)}),0)"
+        y_clamped = f"max(min({y_expr},{max(0, sh - target_h)}),0)"
+        
         return f"scale={sw}:{sh}:flags=lanczos,crop={target_w}:{target_h}:x='{x_clamped}':y='{y_clamped}',format=yuv420p"
 
     def build_ffmpeg_cmd(
