@@ -130,6 +130,14 @@ def json_to_srt(json_data):
     return slice_subs
 
 
+def sanitize_stem(raw_stem: str) -> str:
+    """
+    Entfernt alle nicht-alphanumerischen Zeichen außer Unter- und Bindestrichen,
+    um CWE-22 (Path Traversal) Schwachstellen zu verhindern.
+    """
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", raw_stem)
+
+
 def find_whisper_json(out_dir: Path, stem: str) -> Path:
     cand = out_dir / f"{stem}.json"
     if cand.exists():
@@ -163,7 +171,7 @@ def process_pre_cuts(
     for vid in raw_dir.glob("*"):
         if vid.suffix.lower() not in VIDEO_EXTS:
             continue
-        stem = vid.stem
+        stem = sanitize_stem(vid.stem)
         if stem in windows:
             entry = windows[stem]
             start_str = entry.get("start", "00:00:00")
@@ -335,7 +343,7 @@ def main():
     log(f"Verarbeite {len(files)} Videos...")
 
     for vid in files:
-        stem = vid.stem
+        stem = sanitize_stem(vid.stem)
         log(f"=== {stem} ===")
 
         json_file = find_whisper_json(out_whisper / stem, stem)
