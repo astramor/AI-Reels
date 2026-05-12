@@ -512,6 +512,89 @@ def main():
                 )
                 input()
 
+            # Vorbereitung der Argumente für das parallele Rendering
+            for item in render_queue:
+                current_start = item["start"]
+                current_end = item["end"]
+                final_srt_arg = str(predigt_srt)
+                final_json_arg = str(json_file) if json_file else ""
+
+                if args.confirm_subtitles:
+                    if json_file and item["temp_json"].exists():
+                        with open(item["temp_json"], "r", encoding="utf-8") as f:
+                            edited_json = json.load(f)
+
+                        if edited_json and edited_json.get("segments"):
+                            current_start = edited_json["segments"][0]["start"]
+                            current_end = edited_json["segments"][-1]["end"]
+                            new_subs = json_to_srt(edited_json)
+                            item["temp_srt"].write_text(
+                                srt.compose(new_subs), encoding="utf-8"
+                            )
+                            final_srt_arg = str(item["temp_srt"])
+                            final_json_arg = str(item["temp_json"])
+                    elif item["temp_srt"].exists():
+                        edited_subs = load_srt_file(item["temp_srt"])
+                        if edited_subs:
+                            ns, ne = get_times_from_srt(edited_subs)
+                            if ns is not None:
+                                current_start, current_end = ns, ne
+                                final_srt_arg = str(item["temp_srt"])
+                
+                item["start"] = current_start
+                item["end"] = current_end
+                item["final_srt_arg"] = final_srt_arg
+                item["final_json_arg"] = final_json_arg
+
+            log(f"🚀 Starte paralleles Rendering mit max_workers=3...")
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                for item in render_queue:
+                    executor.submit(
+                        render_clip,
+                        item,
+                        vid,
+                        reels_out,
+                        summ_dir,
+                        stem,
+                        args
+                    )
+
+    log("Fertig.")
+
+
+if __name__ == "__main__":
+    main()
+                json.dump(mini_json, f, indent=2, ensure_ascii=False)
+                            # 2. SRT DIREKT aus dem mini_json generieren (100% synchron!)
+                            slice_subs = json_to_srt(mini_json)
+                            temp_srt_path.write_text(
+                                srt.compose(slice_subs), encoding="utf-8"
+                            )
+                    else:
+                        # Fallback, falls kein JSON existiert
+                        slice_subs = get_srt_slice(all_subs, c_start, c_end)
+                        temp_srt_path.write_text(
+                            srt.compose(slice_subs), encoding="utf-8"
+                        )
+
+                render_queue.append(
+                    {
+                        "idx": idx,
+                        "label": label,
+                        "start": c_start,
+                        "end": c_end,
+                        "temp_srt": temp_srt_path,
+                        "temp_json": temp_json_path,
+                        "title": label,
+                    }
+                )
+
+            if args.confirm_subtitles:
+                print(
+                    f"\n✋ PAUSE: 'Endkontrolle' für {len(render_queue)} Clips. ENTER zum Rendern..."
+                )
+                input()
+
             for item in render_queue:
                 idx = item["idx"]
                 current_start = item["start"]
