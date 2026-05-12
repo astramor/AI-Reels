@@ -46,22 +46,19 @@ Die Codebasis ist modular aufgebaut und trennt Konfiguration, Domänenlogik und 
 
 ## 3. Änderungshistorie (Changelog)
 
-### Version 2.3 - AI Reels Neustart & Performance (Heute)
-*   **Rebranding**: Projekt in **"AI Reels"** umbenannt und Repository auf GitHub neu initialisiert.
-*   **CLI-Revolution**: `main.py` als zentraler Einstiegspunkt implementiert. Vollständige Argument-Validierung und Routing.
-*   **Performance-Boost**:
-    *   **Paralleles Rendering**: `batch_reels.py` nutzt nun `ThreadPoolExecutor` für gleichzeitiges Rendern mehrerer Clips.
-    *   **FFmpeg-Optimierung**: Binärer Suchbaum für Tracking-Koordinaten in `renderer.py` implementiert. Reduziert Parse-Last für FFmpeg massiv.
-    *   **Keyframe-Limiting**: Begrenzung auf max. 20 Tracking-Punkte pro Clip für maximale Stabilität.
-*   **Sicherheit & Robustheit**:
-    *   **CWE-22 Mitigation**: Pfad-Sanitierung (`sanitize_stem`) in `batch_reels.py` verhindert Path-Traversal-Angriffe durch Dateinamen.
-    *   **Signal Handling**: Globales Abfangen von `SIGINT` und `SIGTERM` sorgt für sauberes Beenden aller Hintergrundprozesse (FFmpeg/Whisper).
-    *   **Abhängigkeits-Schlankheitskur**: `pyproject.toml` radikal vereinfacht. WhisperX wird nun als direkte Git-Abhängigkeit geladen.
-    *   **Python 3.13 Protection**: Kompatibilität auf Python 3.10 bis 3.12 eingeschränkt, um ML-Bibliothek-Konflikte zu vermeiden.
-*   **Code-Qualität**:
-    *   Vollständiges Refactoring von `batch_reels.py` in modulare Sub-Funktionen zur besseren Testbarkeit.
-    *   Umstellung auf Python-Standardbibliothek (`statistics.median`) in der Rendering-Pipeline.
-    *   Professionelle `README.md` mit Fokus auf Features und `uv`-Setup erstellt.
+### Version 2.4 - Workflow-Automatisierung & KI-Optimierung (Aktuell)
+*   **One-Command-Workflow**: `main.py` und `video_highlight_pipeline_smart.py` wurden vollständig automatisiert.
+    *   **Auto-Transkription**: Integrierter "Schritt 0" führt WhisperX automatisch aus, falls keine SRT-Datei vorhanden ist (Optimiert für RTX 4070 Ti SUPER: `large-v3`, `float16`, `cuda`).
+    *   **Auto-Highlight-Generierung**: Falls `spans_md` fehlt, wird diese automatisch via LLM aus der Transkription erstellt.
+    *   **Vereinfachte CLI**: Die Pipeline kann nun mit nur einem Parameter (`--video`) gestartet werden; alle Zwischenschritte werden intelligent abgeleitet.
+*   **Gemini Pro Integration**:
+    *   **Strukturierter Output**: Umstellung der Highlight-Extraktion auf natives JSON-Schema (`google-genai` SDK) für 100% verlässliche Zeitstempel.
+    *   **Zweistufiger Prozess**: Implementierung eines Scout/Editor-Verfahrens zur besseren Filterung viraler Zitate.
+*   **Robustheit**:
+    *   Verbesserte Pfad-Propagation für nahtlosen Übergang zwischen Transkription, Zusammenfassung und Rendering.
+    *   Integration von `shutil` für verlässliches Datei-Management generierter Metadaten.
+
+### Version 2.3 - AI Reels Neustart & Performance
 
 ### Version 2.2 - Härtung & Qualitätssicherung
 *   **Konfigurations-Validierung**: Pydantic-Field-Constraints für alle Settings.

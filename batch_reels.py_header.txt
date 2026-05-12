@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import argparse, os, sys, subprocess, shlex, json, yaml, shutil, re, signal
+from pathlib import Path
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from loguru import logger
+import srt
+from core.time_utils import hms_to_seconds, parse_time_to_seconds, seconds_to_hms
+from domains.highlights.parser import HighlightParser
+from core.commands import run_command, ProcessRegistry
+
+# --- Logging Configuration ---
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+logger.remove()  # Standard-Handler entfernen
+logger.add(sys.stderr, level="INFO")  # Konsolenausgabe
+logger.add(
+    LOG_DIR / "reels_{time}.log",
+    rotation="50 MB",
+    retention="10 days",
+    level="INFO",
+    encoding="utf-8"
+)
+
+VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".mp3", ".wav", ".webm"}
+
+
+def signal_handler(sig, frame):
+    """
+    Abbruch-Handler für SIGINT und SIGTERM.
+    Beendet alle laufenden Subprozesse.
+    """
+    signame = signal.Signals(sig).name
+    logger.warning(f"🛑 Abbruch durch {signame} empfangen...")
+    ProcessRegistry.terminate_all()
+    logger.info("👋 Programm beendet.")
+    sys.exit(0)
+
+
+# Registriere Handler
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+
+def run(cmd, *, env=None, dry_run=False, cwd=None):
+    if dry_run:
+        logger.info(f"▶ (DRY-RUN) {' '.join(shlex.quote(str(c)) for c in cmd)}")
+        return 0
+    
+    try:
+        logger.info(f"▶ {' '.join(shlex.quote(str(c)) for c in cmd)}")
+        if env and env.get("CT2_USE_CUDNN") == "0":
+            logger.debug("  (ENV) CT2_USE_CUDNN=0")
+            
+        run_command(cmd, cwd=cwd, env=env, capture_output=False)
+        return 0
+    except Exception as e:
+        logger.error(f"❌ Command failed: {e}")
+        raise SystemExit(1)

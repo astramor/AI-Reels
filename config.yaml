@@ -71,12 +71,12 @@ face_keys: 200
 blur_bg: true
 
 # --- LLM Provider Auswahl ---
-llm_provider: "gemini"
+llm_provider: "ollama"
 gemini_api_key: "0000"
 gemini_model: "gemini-2.5-pro"
 #ollama
 # Für Ollama
-llm_model: "gemma4:latest"
+llm_model: "qwen2.5:14b-instruct-q6_K"
 #qwen2.5:14b-instruct-q6_K
 # --- Viral Style ---
 color_grade: true

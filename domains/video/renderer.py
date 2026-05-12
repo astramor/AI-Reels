@@ -261,10 +261,11 @@ class FFmpegRenderer:
 
         if music_file:
             # Voice + Music mixing logic
-            voice_chain = "[0:a]"
             if af_filters:
-                voice_chain += ",".join(af_filters)
-            voice_chain += "[voice_norm];"
+                voice_chain = "[0:a]" + ",".join(af_filters) + "[voice_norm];"
+            else:
+                # Verhindert FFmpeg Syntax-Error (No such filter: ''), wenn af_filters leer ist
+                voice_chain = "[0:a]anull[voice_norm];"
 
             music_chain = f"[1:a]volume={music_volume}[music_vol];"
             music_chain += f"[music_vol][voice_norm]sidechaincompress=threshold={ducking_threshold}:ratio={ducking_ratio}:attack={ducking_attack}:release={ducking_release}[music_ducked];"

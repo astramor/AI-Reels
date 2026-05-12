@@ -266,8 +266,8 @@ class SermonSummarizer:
                 temp=0.2
             )
 
-            # Saubere Markdown-Datei für die nachfolgenden Skripte generieren
-            final_clean = [f"- [{obj['timestamp']}] {obj['quote']}" for obj in final_objects]
+            # Saubere Markdown-Datei mit Start -> Ende Syntax generieren
+            final_clean = [f"- [{obj['start_timestamp']} -> {obj['end_timestamp']}] {obj['quote']}" for obj in final_objects]
             (out_dir / "highlights.md").write_text("\n".join(final_clean), encoding="utf-8")
         else:
             longlist = []

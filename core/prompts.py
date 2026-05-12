@@ -45,7 +45,8 @@ REGELN:
 1. Die Sätze müssen komplett für sich alleine stehen können.
 2. Entferne Füllwörter am Satzanfang (Und, Aber, Denn).
 3. Behalte den exakten Zeitstempel des Satzanfangs bei.
-4. Wähle nur Sätze, die eine starke emotionale oder intellektuelle Reaktion auslösen.""",
+4. Wähle nur Sätze, die eine starke emotionale oder intellektuelle Reaktion auslösen.
+5. Bestimme nicht nur den Startpunkt, sondern lies im Transkript weiter und bestimme den exakten Zeitstempel, an dem der Gedanke (oder Satz) logisch endet.""",
     
     "scout_user": "Hier ist das Transkript:\n{chunk}",
 
