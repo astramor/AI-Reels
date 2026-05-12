@@ -1,0 +1,94 @@
+# config.yaml
+
+# --- Pfade ---
+input_dir: "input"
+out_root: "."
+manifest: "sermon_windows.yaml"
+
+# --- Whisper (Transkription) ---
+whisper: true
+whisper_device: "cuda"
+no_cudnn: true
+
+# --- Summarizer (Inhalt) ---
+summarizer_script: "srt_summarizer_local.py"
+summarizer_mode: "fast"
+summarizer_preset: "reel"
+summarizer_timeout: 900
+strict_snap_tol: 8
+min_gap_sec: 12
+target_count: 6      # Wir wollen am Ende 6 Reels
+max_highlights: 8    # <--- ÄNDERUNG: Wir lassen nur 8 suchen (statt 16). 
+                     # Das erhöht die Dichte an "guten" Clips drastisch.
+fix_spelling: false
+llm_titles: true
+# --- Spans (Schnittpunkte & Titel) ---
+build_spans: true
+spans_script: "build_highlight_spans.py"
+span_min: 15
+span_max: 20
+title_min: 3
+title_max: 6
+end_boundary: "end"
+end_forward_tol: 2
+
+# --- Render (Video) ---
+render: true
+reel: true
+nvenc: true
+reencode: true
+crf: 17
+preset: "slow"
+audio_bitrate: "320"
+export_srt: true
+
+# --- Audio & Optik ---
+loudnorm: true
+fade_in: true
+fade_in_sec: 0.15
+fade_sec: 1.5
+fade_out: true
+fade_sec: 1.0
+overlay_title: true
+overlay_fontsize: 40
+overlay_margin_top: 150
+subtitle_fontsize: 10
+# --- Untertitel Style (WICHTIG: Key hinzugefügt!) ---
+subtitle_style: "Fontname=Arial,Fontsize=6,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1.5,Shadow=0,MarginV=70,Alignment=2,Bold=1"
+
+# --- Face Tracking ---
+face_track: false
+face_detect_on_start: true
+face_first_robust: true
+face_first_range: 1.0
+face_first_grid: 0.4
+face_first_steps: 3
+face_sample_rate: 10.0
+face_min_conf: 0.6
+face_smooth_sec: 1.5
+face_use_pose_fallback: true
+face_keys: 200
+blur_bg: true
+
+# --- LLM Provider Auswahl ---
+llm_provider: "gemini"
+gemini_api_key: "0000"
+gemini_model: "gemini-2.5-pro"
+#ollama
+# Für Ollama
+llm_model: "gemma4:latest"
+#qwen2.5:14b-instruct-q6_K
+# --- Viral Style ---
+color_grade: true
+music_dir: "music"
+music_volume: 0.08       
+
+# --- Audio Ducking ---
+ducking_threshold: 0.08 
+ducking_ratio: 5.0       
+ducking_attack: 50       
+ducking_release: 1200    
+
+# --- Workflow Einstellungen ---
+confirm_spans: true      
+confirm_subtitles: true

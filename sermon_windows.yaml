@@ -1,0 +1,13 @@
+sermon_windows:
+  test:
+    start: "00:18:24"
+    end:   "00:44:15"
+  Bauenunter:
+    start: "00:26:00"
+    end:   "00:49:10"
+  Auf dem Weg zum Licht:
+    start: "00:38:40"
+    end:   "00:59:30"
+  "Erlösung in Sicht":
+    start: "00:27:30"
+    end:   "00:51:19"    

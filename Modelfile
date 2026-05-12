@@ -1,0 +1,8 @@
+# Pfad zur heruntergeladenen Datei
+FROM /home/markus/Build/whisperX/Qwen2.5-14B-Instruct-Q6_K.gguf
+
+# Setze das Kontext-Fenster fest auf 8192 (Passt bei Q6 in deine 16GB!)
+PARAMETER num_ctx 8192
+
+# System-Prompt (optional, aber gut für Stabilität)
+SYSTEM "Du bist ein professioneller Video-Editor. Antworte präzise auf Deutsch."

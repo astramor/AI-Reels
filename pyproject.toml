@@ -1,0 +1,35 @@
+[project]
+name = "pythonreels"
+version = "0.1.0"
+description = "A CLI-based video highlight generator using WhisperX and AI-driven tracking."
+authors = [{ name = "Markus Krause" }]
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD-2-Clause" }
+
+dependencies = [
+    "whisperx @ git+https://github.com/m-bain/whisperX.git",
+    "loguru>=0.7.3",
+    "pydantic-settings>=2.0.0",
+    "pyyaml>=6.0.1",
+    "google-genai>=1.0.0",
+    "ollama>=0.4.0",
+    "mediapipe>=0.10.0",
+    "srt>=3.5.3",
+]
+
+[project.scripts]
+pythonreels = "main:main"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "domains*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
