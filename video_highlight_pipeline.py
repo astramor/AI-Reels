@@ -271,8 +271,8 @@ def main():
                         src_w, src_h, target_w, target_h, track
                     )
                 elif settings.face_center and track:
-                    cx = tracker._median([p[1] for p in track])
-                    cy = tracker._median([p[2] for p in track])
+                    cx = get_median([p[1] for p in track])
+                    cy = get_median([p[2] for p in track])
                     cover_override = renderer.cover_scale_crop_filter_with_center(
                         src_w, src_h, target_w, target_h, cx, cy
                     )
@@ -315,4 +315,6 @@ def main():
 
 
 if __name__ == "__main__":
+    main()
+__main__":
     main()
