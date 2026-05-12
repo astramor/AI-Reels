@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
 import pathlib
 import re
 import time
@@ -50,6 +51,52 @@ class SermonSummarizer:
             self.client = OllamaClient(host="http://127.0.0.1:11434")
             self.prompts = OLLAMA_SUMMARIZER_PROMPTS
             logger.info(f"Ollama Mode: {self.model_name}")
+
+    def _get_highlight_schema(self) -> types.Schema:
+        """Definiert die exakte JSON-Struktur, die wir von Gemini erwarten."""
+        return types.Schema(
+            type=types.Type.ARRAY,
+            description="Eine Liste der besten Video-Highlights.",
+            items=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "timestamp": types.Schema(
+                        type=types.Type.STRING, 
+                        description="Der exakte Zeitstempel im Format HH:MM:SS"
+                    ),
+                    "quote": types.Schema(
+                        type=types.Type.STRING, 
+                        description="Das bereinigte, virale Zitat"
+                    )
+                },
+                required=["timestamp", "quote"]
+            )
+        )
+
+    def extract_highlights_gemini(self, sys_prompt: str, user_prompt: str, temp: float = 0.2) -> list:
+        """
+        Führt den Gemini-Aufruf mit striktem JSON-Schema durch.
+        Gibt eine Liste von Dictionaries zurück: [{'timestamp': '...', 'quote': '...'}]
+        """
+        if not self.is_gemini:
+            raise NotImplementedError("Diese Methode erfordert den Gemini Provider.")
+            
+        try:
+            time.sleep(1) # Rate limiting safety
+            res = self.client.models.generate_content(
+                model=self.model_name,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=sys_prompt,
+                    temperature=temp,
+                    response_mime_type="application/json",
+                    response_schema=self._get_highlight_schema(),
+                ),
+            )
+            return json.loads(res.text)
+        except Exception as e:
+            logger.error(f"Gemini API / Parsing Fehler: {e}")
+            return []
 
     def _clean_thinking(self, text: str) -> str:
         if not text:
@@ -192,35 +239,66 @@ class SermonSummarizer:
         if curr:
             hl_chunks.append("\n".join(curr))
 
-        longlist = []
-        for i, c in enumerate(hl_chunks):
-            logger.info(f"Scout Chunk {i + 1}...")
-            res = self.chat("Scout", self.prompts["map"].format(block=c), temp=0.3)
-            longlist.extend([l for l in res.splitlines() if "[" in l])
+        # --- Highlights scouting (Map) ---
+        if self.is_gemini:
+            longlist_objects = []
+            for i, c in enumerate(hl_chunks):
+                logger.info(f"Scout Chunk {i + 1}...")
+                user_msg = self.prompts["scout_user"].format(chunk=c)
+                
+                chunk_results = self.extract_highlights_gemini(
+                    sys_prompt=self.prompts["scout_system"],
+                    user_prompt=user_msg,
+                    temp=0.3
+                )
+                longlist_objects.extend(chunk_results)
 
-        (out_dir / "highlights_longlist.md").write_text(
-            "\n".join(longlist), encoding="utf-8"
-        )
+            # JSON als String formatieren, um ihn in die nächste Prompt-Stufe zu geben
+            longlist_text = json.dumps(longlist_objects, indent=2, ensure_ascii=False)
 
-        # 3. Reduce anwenden
-        logger.info(f"Reducing ({len(longlist)} Candidates)...")
-        final_raw = self.chat(
-            "Editor",
-            self.prompts["reduce"].format(longlist="\n".join(longlist), n=max_highlights),
-            temp=0.2,
-        )
-        final_clean = self._sanitize_highlights(final_raw, items, strict_snap_tol)
+            # --- Reduce anwenden (Editor) ---
+            logger.info(f"Reducing ({len(longlist_objects)} Candidates)...")
+            user_msg_reduce = self.prompts["editor_user"].format(n=max_highlights, longlist=longlist_text)
+            
+            final_objects = self.extract_highlights_gemini(
+                sys_prompt=self.prompts["editor_system"],
+                user_prompt=user_msg_reduce,
+                temp=0.2
+            )
 
-        if len(final_clean) < 6:
-            logger.warning("Auffüllen aus Longlist...")
-            more = self._sanitize_highlights("\n".join(longlist), items)
-            for m in more:
-                if len(final_clean) >= 6:
-                    break
-                if m not in final_clean:
-                    final_clean.append(m)
+            # Saubere Markdown-Datei für die nachfolgenden Skripte generieren
+            final_clean = [f"- [{obj['timestamp']}] {obj['quote']}" for obj in final_objects]
+            (out_dir / "highlights.md").write_text("\n".join(final_clean), encoding="utf-8")
+        else:
+            longlist = []
+            for i, c in enumerate(hl_chunks):
+                logger.info(f"Scout Chunk {i + 1}...")
+                res = self.chat("Scout", self.prompts["map"].format(block=c), temp=0.3)
+                longlist.extend([l for l in res.splitlines() if "[" in l])
 
-        (out_dir / "highlights.md").write_text("\n".join(final_clean), encoding="utf-8")
+            (out_dir / "highlights_longlist.md").write_text(
+                "\n".join(longlist), encoding="utf-8"
+            )
+
+            # 3. Reduce anwenden
+            logger.info(f"Reducing ({len(longlist)} Candidates)...")
+            final_raw = self.chat(
+                "Editor",
+                self.prompts["reduce"].format(longlist="\n".join(longlist), n=max_highlights),
+                temp=0.2,
+            )
+            final_clean = self._sanitize_highlights(final_raw, items, strict_snap_tol)
+
+            if len(final_clean) < 6:
+                logger.warning("Auffüllen aus Longlist...")
+                more = self._sanitize_highlights("\n".join(longlist), items)
+                for m in more:
+                    if len(final_clean) >= 6:
+                        break
+                    if m not in final_clean:
+                        final_clean.append(m)
+
+            (out_dir / "highlights.md").write_text("\n".join(final_clean), encoding="utf-8")
         logger.info("Zusammenfassung und Highlights erfolgreich erstellt.")
         return {
             "summary_path": out_dir / "summary.md",

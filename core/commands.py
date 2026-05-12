@@ -4,6 +4,7 @@
 import subprocess
 import shlex
 import os
+import signal
 from dataclasses import dataclass
 from typing import List, Optional, Union
 import logging
@@ -34,6 +35,36 @@ class CommandError(Exception):
             f"{' '.join(shlex.quote(c) for c in result.command)}\n"
             f"Stderr: {result.stderr.strip()}"
         )
+
+
+class ProcessRegistry:
+    """Trackt aktive Subprozesse für sauberes Beenden."""
+    _processes = set()
+
+    @classmethod
+    def register(cls, proc: subprocess.Popen):
+        cls._processes.add(proc)
+
+    @classmethod
+    def unregister(cls, proc: subprocess.Popen):
+        cls._processes.discard(proc)
+
+    @classmethod
+    def terminate_all(cls):
+        if not cls._processes:
+            return
+        
+        logger.warning(f"Terminating {len(cls._processes)} registered processes...")
+        for proc in list(cls._processes):
+            try:
+                # Versuche die ganze Prozessgruppe zu beenden
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except Exception:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+        cls._processes.clear()
 
 
 def run_command(
@@ -74,46 +105,6 @@ def run_command(
             returncode=proc.returncode,
             stdout=stdout if capture_output else "",
             stderr=stderr if capture_output else ""
-        )
-
-        if check and not result.success:
-            raise CommandError(result)
-
-        return result
-
-    except Exception as e:
-        if isinstance(e, CommandError):
-            raise e
-        
-        # Für andere Fehler (z.B. Datei nicht gefunden)
-        logger.error(f"Failed to execute command '{cmd_str}': {e}")
-        raise
- True,
-    capture_output: bool = True,
-    text: bool = True
-) -> CommandResult:
-    """
-    Führt ein Shell-Kommando sicher aus.
-    Kein shell=True für maximale Sicherheit.
-    """
-    cmd_str = " ".join(shlex.quote(str(c)) for c in command)
-    logger.debug(f"Executing command: {cmd_str}")
-
-    try:
-        proc = subprocess.run(
-            [str(c) for c in command],
-            cwd=cwd,
-            env=env,
-            capture_output=capture_output,
-            text=text,
-            check=False  # Wir handhaben das Fehlerhandling selbst
-        )
-
-        result = CommandResult(
-            command=[str(c) for c in command],
-            returncode=proc.returncode,
-            stdout=proc.stdout if capture_output else "",
-            stderr=proc.stderr if capture_output else ""
         )
 
         if check and not result.success:

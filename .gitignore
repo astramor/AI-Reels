@@ -127,6 +127,10 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# Legacy & Backups
+backup_ass/
+old_files/
+
 # Project Outputs & Data
 raw_videos/
 out/

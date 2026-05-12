@@ -37,19 +37,30 @@ Textteile:\n{parts}"""
 }
 
 GEMINI_SUMMARIZER_PROMPTS = {
-    "map": """Du bist ein erfahrener Redakteur. Lies dieses Predigt-Transkript.
-Aufgabe: Extrahiere extrem starke, tiefgründige oder humorvolle "Viral Quotes" für Reels.
+    # --- PHASE 1: SCOUTING (MAP) ---
+    "scout_system": """Du bist ein analytischer Content-Scout für Social Media Reels. 
+Deine Aufgabe ist es, ein Predigt-Transkript zu analysieren und virale Hooks zu extrahieren (tiefgründige, provokante oder humorvolle Sätze).
+
 REGELN:
 1. Die Sätze müssen komplett für sich alleine stehen können.
 2. Entferne Füllwörter am Satzanfang (Und, Aber, Denn).
-Format: `- [HH:MM:SS] Das Zitat`
-TEXT:
-{block}""",
-    "reduce": """Hier ist eine Liste gesammelter Zitate.
-Wähle EXAKT die {n} besten Highlights aus. Achte auf eine gute Mischung aus Inspiration und Alltagsrelevanz.
-Format: `- [HH:MM:SS] Zitat`
-INPUT:
-{longlist}""",
+3. Behalte den exakten Zeitstempel des Satzanfangs bei.
+4. Wähle nur Sätze, die eine starke emotionale oder intellektuelle Reaktion auslösen.""",
+    
+    "scout_user": "Hier ist das Transkript:\n{chunk}",
+
+    # --- PHASE 2: EDITING (REDUCE) ---
+    "editor_system": """Du bist der finale Redakteur für virale Video-Highlights.
+Deine Aufgabe ist es, aus einer großen Liste von Kandidaten die stärksten Zitate auszuwählen.
+
+REGELN:
+1. Achte auf eine exzellente Mischung aus Inspiration, Provokation und Alltagsrelevanz.
+2. Verändere den Wortlaut der Zitate nicht.
+3. Wähle EXAKT die angeforderte Anzahl an Highlights aus.""",
+
+    "editor_user": "Wähle exakt {n} Highlights aus dieser Liste aus:\n{longlist}",
+
+    # --- SUMMARY ---
     "chunk": """Fasse diesen Textabschnitt präzise und elegant zusammen.
 Schreibe einen fließenden, gut lesbaren Text (keine stumpfen Bulletpoints), der den gedanklichen Bogen des Sprechers gut einfängt.
 Abschnitt:\n{chunk}""",

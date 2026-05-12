@@ -5,10 +5,24 @@ import argparse, os, sys, subprocess, shlex, json, yaml, shutil, re, signal
 from pathlib import Path
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
+from loguru import logger
 import srt
 from core.time_utils import hms_to_seconds, parse_time_to_seconds, seconds_to_hms
 from domains.highlights.parser import HighlightParser
 from core.commands import run_command, ProcessRegistry
+
+# --- Logging Configuration ---
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+logger.remove()  # Standard-Handler entfernen
+logger.add(sys.stderr, level="INFO")  # Konsolenausgabe
+logger.add(
+    LOG_DIR / "reels_{time}.log",
+    rotation="50 MB",
+    retention="10 days",
+    level="INFO",
+    encoding="utf-8"
+)
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".mp3", ".wav", ".webm"}
 
@@ -19,9 +33,9 @@ def signal_handler(sig, frame):
     Beendet alle laufenden Subprozesse.
     """
     signame = signal.Signals(sig).name
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🛑 Abbruch durch {signame} empfangen...")
+    logger.warning(f"🛑 Abbruch durch {signame} empfangen...")
     ProcessRegistry.terminate_all()
-    print("👋 Programm beendet.")
+    logger.info("👋 Programm beendet.")
     sys.exit(0)
 
 
@@ -30,25 +44,20 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 
-def log(msg: str):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}] {msg}")
-
-
 def run(cmd, *, env=None, dry_run=False, cwd=None):
     if dry_run:
-        print("▶ (DRY-RUN)", " ".join(shlex.quote(str(c)) for c in cmd))
+        logger.info(f"▶ (DRY-RUN) {' '.join(shlex.quote(str(c)) for c in cmd)}")
         return 0
     
     try:
-        print("▶", " ".join(shlex.quote(str(c)) for c in cmd))
+        logger.info(f"▶ {' '.join(shlex.quote(str(c)) for c in cmd)}")
         if env and env.get("CT2_USE_CUDNN") == "0":
-            print("  (ENV) CT2_USE_CUDNN=0")
+            logger.debug("  (ENV) CT2_USE_CUDNN=0")
             
         run_command(cmd, cwd=cwd, env=env, capture_output=False)
         return 0
     except Exception as e:
-        print(f"❌ Command failed: {e}")
+        logger.error(f"❌ Command failed: {e}")
         raise SystemExit(1)
 
 
@@ -264,11 +273,11 @@ def render_clip(item, vid, reels_out, summ_dir, stem, args):
         if args.fallback_third and args.fallback_third != "none":
             cmd += ["--fallback-third", args.fallback_third]
 
-        log(f"🎬 Starte Rendering für Clip {idx}: {item['title']}")
+        logger.info(f"🎬 Starte Rendering für Clip {idx}: {item['title']}")
         run(cmd, dry_run=args.dry_run)
-        log(f"✅ Clip {idx} erfolgreich gerendert.")
+        logger.info(f"✅ Clip {idx} erfolgreich gerendert.")
     except Exception as e:
-        log(f"❌ Fehler beim Rendern von Clip {idx}: {e}")
+        logger.info(f"❌ Fehler beim Rendern von Clip {idx}: {e}")
     finally:
         if tmp_span.exists():
             tmp_span.unlink()
@@ -308,7 +317,8 @@ def process_pre_cuts(
             duration = e_sec - s_sec
             if duration <= 0:
                 continue
-            log(f"✂️  Schneide Predigt: {stem} (Start: {start_str}, Dauer: {duration}s)")
+            logger.info(f"✂️  Schneide Predigt: {stem} (Start: {start_str}, Dauer: {duration}s)")
+
             cmd = [
                 "ffmpeg",
                 "-y",
@@ -437,7 +447,7 @@ def setup_argparse(defaults):
 
 
 def execute_transcription(vid, stem, out_whisper_dir, args):
-    log("Starte WhisperX...")
+    logger.info("Starte WhisperX...")
     w_cmd = [
         "whisperx",
         str(vid),
@@ -467,7 +477,7 @@ def execute_transcription(vid, stem, out_whisper_dir, args):
 
 
 def execute_summarizer(srt_file, summ_dir, predigt_srt, defaults, args):
-    log("Starte Summarizer...")
+    logger.info("Starte Summarizer...")
     s_cmd = [
         sys.executable,
         args.summarizer_script,
@@ -492,7 +502,7 @@ def execute_summarizer(srt_file, summ_dir, predigt_srt, defaults, args):
 
 
 def execute_span_builder(hl_md, predigt_srt, spans_md, spans_json, args):
-    log("Berechne Spans & Titel...")
+    logger.info("Berechne Spans & Titel...")
     b_cmd = [
         sys.executable,
         args.spans_script,
@@ -594,7 +604,7 @@ def execute_render_orchestration(vid, stem, summ_dir, json_file, predigt_srt, sp
         item["final_srt_arg"] = final_srt_arg
         item["final_json_arg"] = final_json_arg
 
-    log(f"🚀 Starte paralleles Rendering mit max_workers=3...")
+    logger.info(f"🚀 Starte paralleles Rendering mit max_workers=3...")
     with ThreadPoolExecutor(max_workers=3) as executor:
         for item in render_queue:
             executor.submit(render_clip, item, vid, reels_out, summ_dir, stem, args)
@@ -631,11 +641,11 @@ def main():
         process_pre_cuts(raw_inp, inp, Path(args.manifest), out_whisper, args.force)
 
     files = sorted([f for f in inp.iterdir() if f.suffix.lower() in VIDEO_EXTS])
-    log(f"Verarbeite {len(files)} Videos...")
+    logger.info(f"Verarbeite {len(files)} Videos...")
 
     for vid in files:
         stem = sanitize_stem(vid.stem)
-        log(f"=== {stem} ===")
+        logger.info(f"=== {stem} ===")
 
         json_file = find_whisper_json(out_whisper / stem, stem)
         srt_file = find_whisper_srt(out_whisper / stem, stem)
@@ -646,7 +656,7 @@ def main():
                 json_file = find_whisper_json(out_whisper / stem, stem)
                 srt_file = find_whisper_srt(out_whisper / stem, stem)
             else:
-                log("✅ Whisper Daten vorhanden.")
+                logger.info("✅ Whisper Daten vorhanden.")
 
         if not srt_file:
             continue
@@ -660,7 +670,7 @@ def main():
             execute_summarizer(srt_file, summ_dir, predigt_srt, defaults, args)
 
         if not predigt_srt.exists() and srt_file.exists():
-            log(f"⚠️ ACHTUNG: '{predigt_srt.name}' wurde nicht erstellt. Nutze Fallback.")
+            logger.info(f"⚠️ ACHTUNG: '{predigt_srt.name}' wurde nicht erstellt. Nutze Fallback.")
             shutil.copy(srt_file, predigt_srt)
 
         spans_md = summ_dir / "highlight_spans.md"
@@ -670,7 +680,7 @@ def main():
             if not spans_md.exists() or args.force:
                 execute_span_builder(hl_md, predigt_srt, spans_md, spans_json, args)
             else:
-                log("ℹ️  Spans vorhanden.")
+                logger.info("ℹ️  Spans vorhanden.")
 
             if args.confirm_spans:
                 input(f"\n✋ PAUSE: Prüfe '{spans_md}'. ENTER weiter...")
@@ -678,8 +688,9 @@ def main():
         if args.render and spans_md.exists():
             execute_render_orchestration(vid, stem, summ_dir, json_file, predigt_srt, spans_md, out_reels, args)
 
-    log("Fertig.")
+    logger.info("Fertig.")
 
 
 if __name__ == "__main__":
     main()
+
