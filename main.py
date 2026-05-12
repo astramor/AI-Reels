@@ -31,8 +31,7 @@ def main():
     )
     parser.add_argument(
         "--spans_md",
-        required=True,
-        help="Pfad zur Markdown-Datei mit den Highlights (Zeitstempel + Text)."
+        help="Pfad zur Markdown-Datei mit den Highlights (Zeitstempel + Text). Falls nicht vorhanden, wird sie generiert."
     )
     
     # Optionale Erweiterungen
@@ -85,13 +84,15 @@ def main():
         settings.nvenc = True
 
     logger.info("Starte PythonReels Pipeline...")
+    out_dir = Path(args.out_dir)
+    spans_md = Path(args.spans_md) if args.spans_md else out_dir / "highlights.md"
     
     try:
         run_smart_pipeline(
             video_path=video_path,
-            spans_md=Path(args.spans_md),
+            spans_md=spans_md,
             srt_input=Path(args.srt_input) if args.srt_input else None,
-            out_dir=Path(args.out_dir),
+            out_dir=out_dir,
             transcription_json=Path(args.transcription_json) if args.transcription_json else None,
             music_dir=Path(args.music_dir) if args.music_dir else None,
             subtitles=Path(args.subtitles) if args.subtitles else None

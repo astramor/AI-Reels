@@ -3,6 +3,7 @@
 
 import re
 import json
+import shutil
 import tempfile
 import random
 from pathlib import Path
@@ -245,18 +246,34 @@ def run_smart_pipeline(
     video = video_path.resolve()
     out_dir = (out_dir or settings.out_dir).resolve()
     ensure_outdir(out_dir)
-    
-    # 1. Automatische Highlight-Generierung
+
+    # Schritt 0: Automatische Transkription
+    if not srt_input:
+        srt_input = out_dir / f"{video.stem}.srt"
+    if not transcription_json:
+        transcription_json = out_dir / f"{video.stem}.json"
+
+    if not srt_input.exists():
+        logger.info(f"🎙️ Starte WhisperX für {video.name}...")
+        whisper_cmd = [
+            "whisperx", str(video),
+            "--model", "large-v3",
+            "--language", "de",
+            "--output_dir", str(out_dir),
+            "--device", "cuda",
+            "--compute_type", "float16"
+        ]
+        run_command(whisper_cmd)
+
+    # Schritt 1: Highlights generieren (LLM)
     if not spans_md.exists():
-        if not srt_input:
-            raise FileNotFoundError(f"Highlights '{spans_md}' nicht gefunden und kein '--srt_input' angegeben.")
-        
-        logger.info(f"✨ Generiere Highlights automatisch aus {srt_input.name}...")
+        logger.info(f"✨ Generiere Highlights aus {srt_input.name}...")
         summarizer = SermonSummarizer(settings)
-        res = summarizer.process(str(srt_input), str(spans_md.parent))
-        generated_hl = Path(res["highlights_path"])
-        if generated_hl.resolve() != spans_md.resolve():
-            generated_hl.rename(spans_md)
+        res = summarizer.process(str(srt_input), str(out_dir))
+        # Pfad-Abgleich
+        gen_hl = Path(res["highlights_path"])
+        if gen_hl.resolve() != spans_md.resolve():
+            shutil.copy(gen_hl, spans_md)
 
     # 2. Parser & Daten laden
     hl_parser = HighlightParser()
@@ -301,6 +318,12 @@ if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--video", required=True)
-    p.add_argument("--spans_md", required=True)
+    p.add_argument("--spans_md")
+    p.add_argument("--out_dir")
     args = p.parse_args()
-    run_smart_pipeline(Path(args.video), Path(args.spans_md))
+    
+    v_path = Path(args.video)
+    o_dir = Path(args.out_dir) if args.out_dir else settings.out_dir
+    s_md = Path(args.spans_md) if args.spans_md else o_dir / "highlights.md"
+    
+    run_smart_pipeline(v_path, s_md, out_dir=o_dir)
