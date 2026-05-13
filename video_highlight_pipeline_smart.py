@@ -174,9 +174,15 @@ def process_clip(
                 track = [(t, x, y) for (t, x, y) in track if ((x - cx0) ** 2 + (y - cy0) ** 2) ** 0.5 <= snap_r]
 
         if track and settings.face_track:
+            # Dead-Zone wiederhergestellt: Hält das Bild bei kleinen Bewegungen still
+            dead_zone_amount = src_w * 0.04 # 4% des Bildes als Puffer
+            track = tracker.apply_dead_zone(track, dead_zone_px=dead_zone_amount)
+            
             if settings.face_smooth_sec > 0:
                 track = tracker.smooth_track(track, settings.face_smooth_sec)
-            track = tracker.reduce_keyframes(track, 40)
+            
+            # Massive Erhöhung der Keyframes (60 statt 40) für ultra-glatte Kurven in FFmpeg
+            track = tracker.reduce_keyframes(track, 60)
 
         # Filter-Generierung
         if start_center:

@@ -224,12 +224,12 @@ class FaceTracker:
     def smooth_track(self, track: List[Tuple[float, float, float]], win_sec: float) -> List[Tuple[float, float, float]]:
         """
         Cinematisches Glätten mittels EMA (Exponential Moving Average).
-        Verbesserte Trägheit für 'Smooth-Follow' Effekt.
+        Aggressivere Dämpfung für 'Flüssig-Honig' Effekt.
         """
         if not track: return []
         
-        # Kleineres Alpha = mehr Trägheit = smoother
-        alpha = 0.05 / max(0.1, win_sec) 
+        # Alpha deutlich verkleinert (0.02 statt 0.05) -> Viel mehr Trägheit
+        alpha = 0.02 / max(0.1, win_sec) 
         sx, sy = track[0][1], track[0][2]
         new_track = [(track[0][0], sx, sy)]
         
@@ -237,8 +237,8 @@ class FaceTracker:
             t, x, y = track[i]
             dt = max(0.001, t - track[i-1][0])
             
-            # Dynamisches Alpha basierend auf Zeitabstand
-            c_alpha = min(1.0, alpha * (dt / 0.033))
+            # Dynamisches Alpha
+            c_alpha = min(0.3, alpha * (dt / 0.033)) # Cap bei 0.3 für maximale Ruhe
             
             sx = c_alpha * x + (1 - c_alpha) * sx
             sy = c_alpha * y + (1 - c_alpha) * sy
