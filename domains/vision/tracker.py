@@ -221,29 +221,69 @@ class FaceTracker:
             new_track.append((t, cx, cy))
         return new_track
 
-    def smooth_track(self, track: List[Tuple[float, float, float]], win_sec: float) -> List[Tuple[float, float, float]]:
+    def smooth_track(
+        self, 
+        track: List[Tuple[float, float, float]], 
+        window_length: int = 31, 
+        polyorder: int = 3, 
+        deadzone_px: float = 20.0
+    ) -> List[Tuple[float, float, float]]:
         """
-        Cinematisches Glätten mittels EMA (Exponential Moving Average).
-        Aggressivere Dämpfung für 'Flüssig-Honig' Effekt.
+        Beruhigt Tracking-Daten durch eine Kombination aus Savitzky-Golay-Filter (Rauschunterdrückung)
+        und einer Hysterese (Deadzone), um Micro-Jitter zu eliminieren.
         """
-        if not track: return []
+        if not track:
+            return []
         
-        # Alpha deutlich verkleinert (0.02 statt 0.05) -> Viel mehr Trägheit
-        alpha = 0.02 / max(0.1, win_sec) 
-        sx, sy = track[0][1], track[0][2]
-        new_track = [(track[0][0], sx, sy)]
+        # 1. Savitzky-Golay Filter (SCIPY)
+        try:
+            import numpy as np
+            from scipy.signal import savgol_filter
+            
+            # Konvertierung in Arrays für Vektorisierung
+            times = np.array([p[0] for p in track])
+            xs = np.array([p[1] for p in track])
+            ys = np.array([p[2] for p in track])
+            
+            # Prüfen ob Track lang genug für SG-Filter (window_length muss ungerade und > polyorder sein)
+            if len(track) >= window_length:
+                xs = savgol_filter(xs, window_length, polyorder)
+                ys = savgol_filter(ys, window_length, polyorder)
+            elif len(track) > polyorder + 1:
+                # Dynamische Fenstergröße falls Track zu kurz
+                w = len(track) if len(track) % 2 != 0 else len(track) - 1
+                if w > polyorder:
+                    xs = savgol_filter(xs, w, polyorder)
+                    ys = savgol_filter(ys, w, polyorder)
+        except ImportError:
+            # Fallback falls scipy/numpy nicht installiert sind
+            times = [p[0] for p in track]
+            xs = [p[1] for p in track]
+            ys = [p[2] for p in track]
         
-        for i in range(1, len(track)):
-            t, x, y = track[i]
-            dt = max(0.001, t - track[i-1][0])
-            
-            # Dynamisches Alpha
-            c_alpha = min(0.3, alpha * (dt / 0.033)) # Cap bei 0.3 für maximale Ruhe
-            
-            sx = c_alpha * x + (1 - c_alpha) * sx
-            sy = c_alpha * y + (1 - c_alpha) * sy
-            new_track.append((t, sx, sy))
-        return new_track
+        # 2. Hysterese / Deadzone (Stabilität)
+        # Die Kamera verharrt auf ihrer Position, bis die Abweichung die Deadzone überschreitet
+        smoothed_track = []
+        if len(xs) > 0:
+            cam_x, cam_y = xs[0], ys[0]
+            for i in range(len(xs)):
+                t = times[i]
+                target_x, target_y = xs[i], ys[i]
+                
+                dx = target_x - cam_x
+                dy = target_y - cam_y
+                dist = (dx**2 + dy**2)**0.5
+                
+                if dist > deadzone_px:
+                    # Wir ziehen die Kamera sanft nach, so dass sie wieder am Rand der Deadzone liegt
+                    ratio = (dist - deadzone_px) / dist
+                    cam_x += dx * ratio
+                    cam_y += dy * ratio
+                
+                # Wenn dist <= deadzone_px: cam_x/cam_y bleiben identisch zum vorherigen Punkt
+                smoothed_track.append((float(t), float(cam_x), float(cam_y)))
+                
+        return smoothed_track
 
     def reduce_keyframes(self, track: List[Tuple[float, float, float]], max_keys: int = 40) -> List[Tuple[float, float, float]]:
         """Erhöht die Keyframe-Dichte für weichere FFmpeg-Interpolation."""
