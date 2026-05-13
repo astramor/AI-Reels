@@ -154,15 +154,15 @@ def process_clip(
                 video_path,
                 start_abs,
                 start_abs + dur,
-                settings.face_sample_rate,
-                settings.face_min_conf,
+                sample_fps=20.0,
+                min_conf=settings.face_min_conf,
             )
             if (not track) and settings.face_use_pose_fallback:
                 track = tracker.compute_pose_head_centers(
                     video_path,
                     start_abs,
                     start_abs + dur,
-                    max(6.0, settings.face_sample_rate * 0.7),
+                    sample_fps=12.0,
                 )
 
             if settings.face_track and track and len([p for p in track if p[0] > 0]) < 4:
@@ -174,11 +174,9 @@ def process_clip(
                 track = [(t, x, y) for (t, x, y) in track if ((x - cx0) ** 2 + (y - cy0) ** 2) ** 0.5 <= snap_r]
 
         if track and settings.face_track:
-            dead_zone_amount = src_w * 0.05
-            track = tracker.apply_dead_zone(track, dead_zone_amount)
             if settings.face_smooth_sec > 0:
                 track = tracker.smooth_track(track, settings.face_smooth_sec)
-            track = tracker.reduce_keyframes(track, settings.face_keys)
+            track = tracker.reduce_keyframes(track, 40)
 
         # Filter-Generierung
         if start_center:
@@ -270,10 +268,24 @@ def run_smart_pipeline(
         logger.info(f"✨ Generiere Highlights aus {srt_input.name}...")
         summarizer = SermonSummarizer(settings)
         res = summarizer.process(str(srt_input), str(out_dir))
+        
+        # --- NEU: VRAM freigeben ---
+        summarizer.unload()
+        del summarizer
+        # ---------------------------
+
         # Pfad-Abgleich
         gen_hl = Path(res["highlights_path"])
         if gen_hl.resolve() != spans_md.resolve():
             shutil.copy(gen_hl, spans_md)
+    else:
+        # Falls summarizer nicht benötigt wird, trotzdem versuchen zu entladen (Sicherheit)
+        try:
+            temp_sum = SermonSummarizer(settings)
+            temp_sum.unload()
+            del temp_sum
+        except:
+            pass
 
     # 2. Parser & Daten laden
     hl_parser = HighlightParser()
@@ -290,6 +302,14 @@ def run_smart_pipeline(
     renderer = FFmpegRenderer()
     tracker = FaceTracker()
     sub_processor = SubtitleProcessor()
+
+    # --- NEU: Smart Cut Fallback ---
+    srt_items = sub_processor.load_srt_file(srt_input) if srt_input.exists() else []
+    for h in marks:
+        if h.end is None and srt_items:
+            logger.info(f"📍 Clip '{h.label}' hat keine Endzeit. Suche Smart Cut...")
+            h.end = sub_processor.find_smart_end(srt_items, h.start, min_dur=18.0, max_dur=settings.max_window)
+    # -------------------------------
 
     # 5. Iterative Verarbeitung
     with tempfile.TemporaryDirectory() as temp_dir:

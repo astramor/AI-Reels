@@ -162,5 +162,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             f.write(header + "\n".join(events))
         logger.info(f"   -> {event_count} Karaoke-Events erstellt (Präzisions-Modus).")
 
-    def load_srt_file(self, srt_path: Path):
+    def load_srt_file(self, srt_path: Path) -> List[srt.Subtitle]:
         return list(srt.parse(srt_path.read_text(encoding="utf-8")))
+
+    def find_smart_end(
+        self, srt_items: List[srt.Subtitle], start_sec: float, min_dur: float = 18.0, max_dur: float = 60.0
+    ) -> float:
+        """Findet das nächste logische Satzende im SRT für einen Smart Cut."""
+        import re
+        end_sec = start_sec + 20.0 # Fallback
+        for it in srt_items:
+            s_end = it.end.total_seconds()
+            if s_end > start_sec + min_dur:
+                if re.search(r"[.!?]", it.content):
+                    return s_end
+            if s_end > start_sec + max_dur:
+                return s_end
+        return end_sec

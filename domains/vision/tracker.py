@@ -46,30 +46,19 @@ class FaceTracker:
         video_path: Path,
         start_s: float,
         end_s: float,
-        sample_fps: float = 10.0,
+        sample_fps: float = 20.0,  # Erhöht für flüssigeres Tracking
         min_conf: float = 0.4,
     ) -> List[Tuple[float, float, float]]:
         """
-        Berechnet Gesichtszentren. Erkennt Kameraschnitte und ist robuster gegen "Verlieren".
+        Berechnet Gesichtszentren mit der robusten FaceDetection-Lösung.
+        Optimiert auf 20fps für weichere Bewegungen.
         """
         try:
             import cv2
             import mediapipe as mp
-            from mediapipe.tasks import python
-            from mediapipe.tasks.python import vision
+            import mediapipe.python.solutions.face_detection as mp_face
         except ImportError:
             return []
-
-        if not Path(self.face_model_path).exists():
-            return []
-
-        base_options = python.BaseOptions(model_asset_path=self.face_model_path)
-        options = vision.FaceLandmarkerOptions(
-            base_options=base_options,
-            num_faces=2,  # Wir schauen nach bis zu 2 Gesichtern, um das beste zu wählen
-            min_face_detection_confidence=min_conf,
-            min_tracking_confidence=min_conf
-        )
 
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
@@ -85,7 +74,10 @@ class FaceTracker:
         prev_gray = None
         last_cx, last_cy = W / 2, H / 2
 
-        with vision.FaceLandmarker.create_from_options(options) as landmarker:
+        # Wir nutzen die robuste FaceDetection (Bounding Box) statt Landmarker (Mesh)
+        with mp_face.FaceDetection(
+            model_selection=1, min_detection_confidence=min_conf
+        ) as face_detection:
             curr_f = start_f
             cap.set(cv2.CAP_PROP_POS_FRAMES, curr_f)
             
@@ -99,24 +91,21 @@ class FaceTracker:
                 prev_gray = gray
                 
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-                res = landmarker.detect(mp_image)
+                res = face_detection.process(rgb_frame)
                 t_rel = curr_f / fps - start_s
                 
                 found = False
-                if res.face_landmarks:
+                if res.detections:
                     # Bestes Gesicht wählen (das größte/zentralste)
                     best_score = -1
                     best_center = None
                     
-                    for landmarks in res.face_landmarks:
-                        cx = sum([lm.x for lm in landmarks]) / len(landmarks) * W
-                        cy = sum([lm.y for lm in landmarks]) / len(landmarks) * H
+                    for detection in res.detections:
+                        bbox = detection.location_data.relative_bounding_box
+                        cx = (bbox.xmin + bbox.width / 2) * W
+                        cy = (bbox.ymin + bbox.height / 2) * H
                         
-                        # Bewertung: Größe der Bounding Box + Nähe zur Mitte
-                        xs = [lm.x for lm in landmarks]
-                        ys = [lm.y for lm in landmarks]
-                        area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+                        area = bbox.width * bbox.height
                         dist_to_last = ((cx - last_cx)**2 + (cy - last_cy)**2)**0.5
                         
                         score = area * (1.0 / (1.0 + dist_to_last / W))
@@ -130,8 +119,6 @@ class FaceTracker:
                         found = True
 
                 if not found:
-                    # Wenn verloren, halten wir die Position kurz oder gehen langsam zur Mitte
-                    # Bei einem Schnitt setzen wir auf Mitte zurück
                     if is_cut:
                         last_cx, last_cy = W / 2, H / 2
                     out.append((t_rel, last_cx, last_cy))
@@ -144,7 +131,7 @@ class FaceTracker:
         return out
 
     def compute_pose_head_centers(
-        self, video_path: Path, start_s: float, end_s: float, sample_fps: float = 8.0
+        self, video_path: Path, start_s: float, end_s: float, sample_fps: float = 12.0
     ) -> List[Tuple[float, float, float]]:
         try:
             import cv2
@@ -202,6 +189,7 @@ class FaceTracker:
         win_start = max(0.0, clip_abs_start - half)
         win_end = clip_abs_start + half
         
+        # Nutzt jetzt intern die korrigierte compute_face_centers (FaceDetection)
         faces = self.compute_face_centers(
             video_path, win_start, win_end, sample_fps=face_sample, min_conf=face_min_conf
         )
@@ -234,19 +222,30 @@ class FaceTracker:
         return new_track
 
     def smooth_track(self, track: List[Tuple[float, float, float]], win_sec: float) -> List[Tuple[float, float, float]]:
+        """
+        Cinematisches Glätten mittels EMA (Exponential Moving Average).
+        Verbesserte Trägheit für 'Smooth-Follow' Effekt.
+        """
         if not track: return []
-        alpha = 0.08 / max(0.05, win_sec) # Noch weicher
+        
+        # Kleineres Alpha = mehr Trägheit = smoother
+        alpha = 0.05 / max(0.1, win_sec) 
         sx, sy = track[0][1], track[0][2]
         new_track = [(track[0][0], sx, sy)]
+        
         for i in range(1, len(track)):
             t, x, y = track[i]
             dt = max(0.001, t - track[i-1][0])
+            
+            # Dynamisches Alpha basierend auf Zeitabstand
             c_alpha = min(1.0, alpha * (dt / 0.033))
+            
             sx = c_alpha * x + (1 - c_alpha) * sx
             sy = c_alpha * y + (1 - c_alpha) * sy
             new_track.append((t, sx, sy))
         return new_track
 
-    def reduce_keyframes(self, track: List[Tuple[float, float, float]], max_keys: int) -> List[Tuple[float, float, float]]:
+    def reduce_keyframes(self, track: List[Tuple[float, float, float]], max_keys: int = 40) -> List[Tuple[float, float, float]]:
+        """Erhöht die Keyframe-Dichte für weichere FFmpeg-Interpolation."""
         if not track or len(track) <= max_keys: return track
         return [track[round(i * (len(track)-1) / (max_keys-1))] for i in range(max_keys)]

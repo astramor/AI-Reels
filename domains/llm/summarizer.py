@@ -60,23 +60,27 @@ class SermonSummarizer:
             items=types.Schema(
                 type=types.Type.OBJECT,
                 properties={
-                    "timestamp": types.Schema(
+                    "start_timestamp": types.Schema(
                         type=types.Type.STRING, 
-                        description="Der exakte Zeitstempel im Format HH:MM:SS"
+                        description="Der exakte Start-Zeitstempel im Format HH:MM:SS"
+                    ),
+                    "end_timestamp": types.Schema(
+                        type=types.Type.STRING, 
+                        description="Der exakte End-Zeitstempel im Format HH:MM:SS"
                     ),
                     "quote": types.Schema(
                         type=types.Type.STRING, 
                         description="Das bereinigte, virale Zitat"
                     )
                 },
-                required=["timestamp", "quote"]
+                required=["start_timestamp", "end_timestamp", "quote"]
             )
         )
 
     def extract_highlights_gemini(self, sys_prompt: str, user_prompt: str, temp: float = 0.2) -> list:
         """
         Führt den Gemini-Aufruf mit striktem JSON-Schema durch.
-        Gibt eine Liste von Dictionaries zurück: [{'timestamp': '...', 'quote': '...'}]
+        Gibt eine Liste von Dictionaries zurück: [{'start_timestamp': '...', 'end_timestamp': '...', 'quote': '...'}]
         """
         if not self.is_gemini:
             raise NotImplementedError("Diese Methode erfordert den Gemini Provider.")
@@ -141,6 +145,16 @@ class SermonSummarizer:
                 logger.error(f"Ollama Error: {e}")
                 return ""
 
+    def unload(self):
+        """Entlädt das Modell aus dem VRAM (nur für Ollama)."""
+        if not self.is_gemini and self.client:
+            logger.info(f"Unloading model {self.model_name} from VRAM...")
+            try:
+                # Ollama Trick: keep_alive=0 entlädt das Modell sofort
+                self.client.generate(model=self.model_name, keep_alive=0)
+            except Exception as e:
+                logger.warning(f"Modell-Entladen fehlgeschlagen: {e}")
+
     def _srt_items(self, srt_path: pathlib.Path) -> Generator[Tuple[srt.Subtitle, str], None, None]:
         for it in srt.parse(srt_path.read_text(encoding="utf-8")):
             yield it, re.sub(r"\s+", " ", it.content.replace("\n", " ").strip())
@@ -151,6 +165,23 @@ class SermonSummarizer:
             for it, txt in items
             if len(txt.split()) > 5
         ]
+
+    def _find_smart_end(self, start_sec: int, items: List[Tuple[srt.Subtitle, str]], min_dur: int = 18, max_dur: int = 60) -> str:
+        """Findet das nächste logische Satzende im SRT für einen Smart Cut."""
+        end_sec = start_sec + 20 # Fallback
+        for it, txt in items:
+            s_end = it.end.total_seconds()
+            if s_end > start_sec + min_dur:
+                if re.search(r"[.!?]", txt):
+                    end_sec = int(s_end)
+                    break
+            if s_end > start_sec + max_dur:
+                end_sec = int(s_end)
+                break
+        
+        # In HMS umwandeln
+        td = timedelta(seconds=end_sec)
+        return timedelta_to_hms(td)
 
     def _sanitize_highlights(self, text: str, items: List[Tuple[srt.Subtitle, str]], tol: int = 8) -> List[str]:
         out = []
@@ -180,20 +211,23 @@ class SermonSummarizer:
             if any(s in used for s in range(sec - 15, sec + 15)):
                 continue
 
-            found = None
+            found_start = None
             for off in range(-tol, tol + 1):
                 if (sec + off) in sec_map:
-                    found = sec_map[sec + off]
+                    found_start = sec_map[sec + off]
+                    start_sec_actual = sec + off
                     break
 
-            if found:
+            if found_start:
                 clean = (
                     re.sub(r"^(Und|Aber|Denn)\s+", "", txt, flags=re.IGNORECASE)
                     .strip('"')
                     .strip()
                 )
                 if len(clean) > 8:
-                    out.append(f"- [{found}] {clean}")
+                    # SMART CUT LOGIC HIER
+                    found_end = self._find_smart_end(start_sec_actual, items)
+                    out.append(f"- [{found_start} -> {found_end}] {clean}")
         return out
 
     def process(self, srt_path_str: str, out_dir_str: str, max_highlights: int = 8, strict_snap_tol: int = 8):

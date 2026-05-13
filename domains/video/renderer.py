@@ -71,8 +71,8 @@ class FFmpegRenderer:
         center_y: float,
     ) -> str:
         s = max(target_w / src_w, target_h / src_h)
-        sw = int(round(src_w * s))
-        sh = int(round(src_h * s))
+        sw = int(round(src_w * s)) // 2 * 2
+        sh = int(round(src_h * s)) // 2 * 2
         scx = center_x * s
         scy = center_y * s
         x = int(round(scx - target_w / 2))
@@ -97,8 +97,8 @@ class FFmpegRenderer:
             return self.cover_scale_crop_filter(target_w, target_h)
 
         s = max(target_w / src_w, target_h / src_h)
-        sw = int(round(src_w * s))
-        sh = int(round(src_h * s))
+        sw = int(round(src_w * s)) // 2 * 2
+        sh = int(round(src_h * s)) // 2 * 2
 
         # 1. Keyframes einschränken (FFmpeg Filter-Limit vermeiden)
         # Wir nehmen maximal 20 Keyframes, um O(N) Overhead zu verhindern.
@@ -214,6 +214,9 @@ class FFmpegRenderer:
                 v_filters.append(cover_filter_override)
             else:
                 v_filters.append(self.cover_scale_crop_filter(target_w, target_h))
+            
+            # Subtiles Nachschärfen für hochskalierte Crops
+            v_filters.append("unsharp=3:3:0.5:3:3:0.0")
 
         if color_grading:
             v_filters.append("eq=saturation=1.3:contrast=1.1:brightness=-0.02")
