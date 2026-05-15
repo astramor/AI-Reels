@@ -2,7 +2,13 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 from typing import Optional
+import shutil
 
+def get_default_device() -> str:
+    return "cuda" if shutil.which("nvidia-smi") else "cpu"
+
+def get_default_compute_type() -> str:
+    return "float16" if shutil.which("nvidia-smi") else "int8"
 
 class Settings(BaseSettings):
     """
@@ -15,6 +21,37 @@ class Settings(BaseSettings):
     llm_provider: str = Field(default="ollama", env="LLM_PROVIDER")
     llm_model: str = Field(default="qwen2.5:14b-instruct-q6_K", env="LLM_MODEL")
     gemini_model: str = Field(default="gemini-2.0-flash", env="GEMINI_MODEL")
+
+    # --- WhisperX / Transcription ---
+    whisper_model: str = Field(default="large-v2", env="WHISPER_MODEL")
+    whisper_language: Optional[str] = Field(default=None, env="WHISPER_LANGUAGE")
+    
+    # --- CUDA / Device ---
+    whisper_device: str = Field(default_factory=get_default_device, env="WHISPER_DEVICE")
+    whisper_device_index: int = Field(default=0, env="WHISPER_DEVICE_INDEX")
+    
+    # --- Compute ---
+    whisper_compute_type: str = Field(default_factory=get_default_compute_type, env="WHISPER_COMPUTE_TYPE")
+    
+    # --- Performance ---
+    whisper_batch_size: int = Field(default=16, env="WHISPER_BATCH_SIZE")
+    whisper_threads: int = Field(default=4, env="WHISPER_THREADS")
+    whisper_chunk_size: int = Field(default=30, env="WHISPER_CHUNK_SIZE")
+    
+    # --- Alignment ---
+    align_model: Optional[str] = Field(default=None, env="ALIGN_MODEL")
+    enable_alignment: bool = Field(default=True, env="ENABLE_ALIGNMENT")
+    return_char_alignments: bool = Field(default=False, env="RETURN_CHAR_ALIGNMENTS")
+    
+    # --- VAD ---
+    vad_method: str = Field(default="pyannote", env="VAD_METHOD")
+    vad_onset: float = Field(default=0.500, env="VAD_ONSET")
+    vad_offset: float = Field(default=0.363, env="VAD_OFFSET")
+    
+    # --- Optional: Diarization ---
+    diarization_enabled: bool = Field(default=False, env="DIARIZATION_ENABLED")
+    min_speakers: Optional[int] = Field(default=None, env="MIN_SPEAKERS")
+    max_speakers: Optional[int] = Field(default=None, env="MAX_SPEAKERS")
 
     # --- Pfade ---
     raw_dir: Path = Field(default="raw_videos", env="RAW_DIR")

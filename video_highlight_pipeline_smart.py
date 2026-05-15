@@ -5,6 +5,7 @@ import re
 import json
 import shutil
 import tempfile
+import time
 import random
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -15,8 +16,10 @@ from domains.vision.tracker import FaceTracker
 from domains.transcription.processor import SubtitleProcessor
 from domains.highlights.parser import HighlightParser, Highlight
 from domains.llm.summarizer import SermonSummarizer
+from domains.video.hardware import detect_available_nvenc_codecs
 from core.config import settings
 from core.commands import run_command
+from core.artifacts import ArtifactManager, save_json
 
 # ==============================================================================
 # 1. HELPERS
@@ -174,16 +177,16 @@ def process_clip(
                 track = [(t, x, y) for (t, x, y) in track if ((x - cx0) ** 2 + (y - cy0) ** 2) ** 0.5 <= snap_r]
 
         if track and settings.face_track:
-            # Professionelle Glättung (Savitzky-Golay + Hysterese)
+            # 2. Weichere Glättung und größere Deadzone gegen Micro-Jitter
             track = tracker.smooth_track(
                 track, 
-                window_length=31, 
-                polyorder=3, 
-                deadzone_px=20.0
+                window_length=51,  # Größeres Fenster: Macht die Kamerabewegung träger und flüssiger
+                polyorder=2,       # Grad 2: Verhindert "Überschwingen" bei schnellen Bewegungen
+                deadzone_px=80.0   # Verdoppelt: Ignoriert das permanente Zittern der Bounding Box
             )
             
-            # Massive Erhöhung der Keyframes (60) für ultra-glatte Kurven in FFmpeg
-            track = tracker.reduce_keyframes(track, 60)
+            # 2.5 Lückenlose Interpolation für FFmpeg (verhindert Mikroruckler)
+            track = tracker.interpolate_track_to_fps(track, target_fps=30.0)
 
         # Filter-Generierung
         if start_center:
@@ -212,7 +215,7 @@ def process_clip(
         subtitles=subtitles_path,
         overlay_title=title_text,
         reencode=settings.reencode,
-        video_codec="h264_nvenc" if settings.nvenc else "libx264",
+        video_codec="h264_nvenc" if settings.nvenc else "libx265",
         target_w=target_w,
         target_h=target_h,
         cover_filter_override=cover_override,
@@ -238,43 +241,74 @@ def process_clip(
 
 def run_smart_pipeline(
     video_path: Path,
-    spans_md: Path,
+    spans_json: Path,
     srt_input: Optional[Path] = None,
     out_dir: Optional[Path] = None,
     transcription_json: Optional[Path] = None,
     music_dir: Optional[Path] = None,
-    subtitles: Optional[Path] = None
+    subtitles: Optional[Path] = None,
+    force_rebuild: bool = False
 ):
     """
     Setup der Pipeline: Validierung, Highlight-Generierung, Instanziierung der Domänen.
     """
     video = video_path.resolve()
-    out_dir = (out_dir or settings.out_dir).resolve()
-    ensure_outdir(out_dir)
+    base_out_dir = (out_dir or settings.out_dir).resolve()
+    ensure_outdir(base_out_dir)
+    
+    # --- ARTIFACT MANAGER INITIALISIEREN ---
+    am = ArtifactManager(base_work_dir=base_out_dir / "work", video_path=video, force_rebuild=force_rebuild)
+    am.log_step("Pipeline Initialization", "START", details=f"Video: {video.name}")
+
+    # --- HARDWARE FALLBACK ---
+    if settings.nvenc:
+        available = detect_available_nvenc_codecs()
+        if "h264_nvenc" not in available:
+            logger.warning("NVENC 'h264_nvenc' nicht verfügbar. Automatischer Fallback auf CPU (libx265).")
+            settings.nvenc = False
 
     # Schritt 0: Automatische Transkription
     if not srt_input:
-        srt_input = out_dir / f"{video.stem}.srt"
+        srt_input = am.get_path(f"{am.stem}.srt")
     if not transcription_json:
-        transcription_json = out_dir / f"{video.stem}.json"
+        transcription_json = am.get_path(f"{am.stem}.json")
 
-    if not srt_input.exists():
+    if not srt_input.exists() or force_rebuild:
         logger.info(f"🎙️ Starte WhisperX für {video.name}...")
+        t_start = time.time()
         whisper_cmd = [
             "whisperx", str(video),
-            "--model", "large-v3",
-            "--language", "de",
-            "--output_dir", str(out_dir),
-            "--device", "cuda",
-            "--compute_type", "float16"
+            "--model", settings.whisper_model,
+            "--output_dir", str(am.work_dir),
+            "--device", settings.whisper_device,
+            "--compute_type", settings.whisper_compute_type,
+            "--batch_size", str(settings.whisper_batch_size),
+            "--vad_onset", str(settings.vad_onset),
+            "--vad_offset", str(settings.vad_offset),
         ]
+        if settings.whisper_language:
+            whisper_cmd.extend(["--language", settings.whisper_language])
+        if settings.align_model:
+            whisper_cmd.extend(["--align_model", settings.align_model])
+        if settings.diarization_enabled:
+            whisper_cmd.append("--diarize")
+            if settings.min_speakers:
+                whisper_cmd.extend(["--min_speakers", str(settings.min_speakers)])
+            if settings.max_speakers:
+                whisper_cmd.extend(["--max_speakers", str(settings.max_speakers)])
+        
         run_command(whisper_cmd)
+        am.log_step("Transcription", "SUCCESS", duration_sec=time.time() - t_start)
+    else:
+        am.log_step("Transcription", "SKIPPED", details="Artifacts already exist")
 
     # Schritt 1: Highlights generieren (LLM)
-    if not spans_md.exists():
+    final_spans_json = spans_json
+    if not final_spans_json.exists() or force_rebuild:
         logger.info(f"✨ Generiere Highlights aus {srt_input.name}...")
+        t_start = time.time()
         summarizer = SermonSummarizer(settings)
-        res = summarizer.process(str(srt_input), str(out_dir))
+        res = summarizer.process(str(srt_input), str(am.work_dir))
         
         # --- NEU: VRAM freigeben ---
         summarizer.unload()
@@ -283,9 +317,12 @@ def run_smart_pipeline(
 
         # Pfad-Abgleich
         gen_hl = Path(res["highlights_path"])
-        if gen_hl.resolve() != spans_md.resolve():
-            shutil.copy(gen_hl, spans_md)
+        if gen_hl.resolve() != final_spans_json.resolve():
+            shutil.copy(gen_hl, final_spans_json)
+            
+        am.log_step("LLM Highlights", "SUCCESS", duration_sec=time.time() - t_start)
     else:
+        am.log_step("LLM Highlights", "SKIPPED", details="Artifact already exists")
         # Falls summarizer nicht benötigt wird, trotzdem versuchen zu entladen (Sicherheit)
         try:
             temp_sum = SermonSummarizer(settings)
@@ -296,7 +333,7 @@ def run_smart_pipeline(
 
     # 2. Parser & Daten laden
     hl_parser = HighlightParser()
-    marks = hl_parser.load_highlights_from_md(spans_md)
+    marks = hl_parser.load_highlights_from_json(final_spans_json)
     src_w, src_h = probe_wh(video)
     target_w, target_h = 1080, 1920
 
@@ -317,8 +354,21 @@ def run_smart_pipeline(
             logger.info(f"📍 Clip '{h.label}' hat keine Endzeit. Suche Smart Cut...")
             h.end = sub_processor.find_smart_end(srt_items, h.start, min_dur=18.0, max_dur=settings.max_window)
     # -------------------------------
+    
+    # --- ARTIFACT MANAGER: Render Plan speichern ---
+    render_plan = {
+        "video": str(video),
+        "target_resolution": f"{target_w}x{target_h}",
+        "music": str(music_file) if music_file else None,
+        "clips": [
+            {"id": i, "start": h.start, "end": h.end, "title": h.label} for i, h in enumerate(marks, 1)
+        ]
+    }
+    save_json(am.get_path("render_plan.json"), render_plan)
+    am.save_metadata({"pipeline_version": "2.2", "model": settings.whisper_model})
 
     # 5. Iterative Verarbeitung
+    t_start_render = time.time()
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir_path = Path(temp_dir)
         for idx, h in enumerate(marks, start=1):
@@ -326,7 +376,7 @@ def run_smart_pipeline(
                 idx=idx,
                 h=h,
                 video_path=video,
-                out_dir=out_dir,
+                out_dir=base_out_dir,
                 json_path=transcription_json,
                 temp_dir_path=temp_dir_path,
                 src_w=src_w,
@@ -339,18 +389,20 @@ def run_smart_pipeline(
                 music_file=music_file,
                 subtitles_path=subtitles
             )
+            
+    am.log_step("Video Rendering", "SUCCESS", duration_sec=time.time() - t_start_render, details=f"{len(marks)} clips rendered")
 
 if __name__ == "__main__":
     # Fallback-Aufruf für Kompatibilität
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--video", required=True)
-    p.add_argument("--spans_md")
+    p.add_argument("--spans_json")
     p.add_argument("--out_dir")
     args = p.parse_args()
     
     v_path = Path(args.video)
     o_dir = Path(args.out_dir) if args.out_dir else settings.out_dir
-    s_md = Path(args.spans_md) if args.spans_md else o_dir / "highlights.md"
+    s_json = Path(args.spans_json) if args.spans_json else o_dir / "highlights.json"
     
-    run_smart_pipeline(v_path, s_md, out_dir=o_dir)
+    run_smart_pipeline(v_path, s_json, out_dir=o_dir)

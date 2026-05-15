@@ -1,39 +1,42 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import re
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
-from core.time_utils import hms_to_seconds
+from domains.highlights.models import HighlightPayload
 
 @dataclass
 class Highlight:
-    start: int
-    end: Optional[int] = None
+    start: float
+    end: Optional[float] = None
     label: str = ""
 
 class HighlightParser:
     """
-    Klasse zum Parsen von Highlight-Definitionen aus Markdown-Dateien.
+    Klasse zum Parsen von Highlight-Definitionen aus JSON-Dateien.
+    Gibt die klassische Highlight-Struktur für die Rendering-Pipeline zurück.
     """
-
-    LINE_RE = re.compile(
-        r"^\s*(?:[-–—*]\s*)?\[(\d{2}):(\d{2}):(\d{2})(?:\s*(?:->|→)\s*(\d{2}):(\d{2}):(\d{2}))?\]\s*(.+?)\s*$"
-    )
 
     def __init__(self):
         pass
 
-    def load_highlights_from_md(self, md_path: Path) -> List[Highlight]:
-        text = md_path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    def load_highlights_from_json(self, json_path: Path) -> List[Highlight]:
+        if not json_path.exists():
+            return []
+            
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            
+        # Pydantic Payload validieren (falls die Datei manuell editiert wurde)
+        payload = HighlightPayload.model_validate(data)
+        
         hl: List[Highlight] = []
-        for line in text.splitlines():
-            m = self.LINE_RE.match(line)
-            if not m:
-                continue
-            g = m.groups()
-            start = hms_to_seconds(g[0], g[1], g[2])
-            end = hms_to_seconds(g[3], g[4], g[5]) if g[3] and g[4] and g[5] else None
-            hl.append(Highlight(start, end, g[6].strip()))
+        for item in payload.highlights:
+            hl.append(Highlight(
+                start=item.start,
+                end=item.end,
+                label=item.title
+            ))
         return hl

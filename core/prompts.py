@@ -12,63 +12,54 @@ Konsolidiert aus summarizer.py, srt_summarizer_local.py und build_highlight_span
 # 1. SUMMARY & HIGHLIGHT SCOUTING (SermonSummarizer)
 # ==============================================================================
 
-OLLAMA_SUMMARIZER_PROMPTS = {
-    "map": """Aufgabe: Du bist Content-Scout. Finde ALLES in diesem Text, was viral gehen könnte.
-Regeln:
-1. Format: `- [HH:MM:SS] Der Text`
-2. WICHTIG: Sei nicht zu streng. Suche nach spannenden Sätzen, Humor oder steilen Thesen.
-3. Zeitstempel immer exakt kopieren.
-TEXT: {block}""",
-    "reduce": """Wähle die absoluten Top {n} Highlights aus dieser Liste.
-Achte auf Abwechslung (Humor vs. Tiefe).
-Gib NUR eine Markdown-Liste zurück.
-Format: `- [HH:MM:SS] Text`.
-INPUT: {longlist}""",
-    "chunk": """Fasse diesen Textabschnitt sachlich zusammen. 
-Nutze STRIKTE Bulletpoints. Keine langen Schachtelsätze.
-Abschnitt:\n{chunk}""",
-    "merge": """Erstelle aus diesen Teil-Zusammenfassungen eine strukturierte Gesamt-Übersicht.
-Nutze exakt diese Struktur:
-1. Kernaussage (1 Satz)
-2. Hauptpunkte (Bulletpoints)
-3. Wichtigstes Takeaway
+JSON_HIGHLIGHT_SYSTEM_PROMPT = """Du bist ein analytischer Content-Scout und erfahrener Social Media Editor für Video-Reels.
+Deine Aufgabe ist es, aus einem Predigt-Transkript die stärksten, viralsten Momente zu extrahieren.
 
-Textteile:\n{parts}"""
+WICHTIGE REGELN FÜR DIE AUSWAHL:
+1. Wähle Momente, die inspirierend, provokant, tiefgründig oder humorvoll sind.
+2. Ein Clip sollte eine in sich geschlossene, vollständige Aussage bilden.
+3. Die optimale Länge eines Clips liegt zwischen 30 und 60 Sekunden.
+4. Vermeide Clips, die mitten im Satz beginnen oder enden.
+5. Nutze EXAKT die Zeitstempel, die im Text stehen. Erfinde keine Zeitstempel.
+
+AUSGABE-FORMAT:
+Du musst STRICT JSON ONLY zurückgeben. 
+- KEIN Markdown.
+- KEINE Code-Blöcke (wie ```json).
+- KEINE Erklärungen oder Einleitungen.
+
+Das JSON muss exakt dieses Schema erfüllen:
+{
+  "highlights": [
+    {
+      "title": "Kurzer, packender Titel",
+      "start": 123.45,
+      "end": 171.20,
+      "reason": "Kurze Begründung, warum der Clip stark ist",
+      "hook": "Der erste Satz, der die Aufmerksamkeit fängt",
+      "confidence": 0.95
+    }
+  ]
 }
 
-GEMINI_SUMMARIZER_PROMPTS = {
-    # --- PHASE 1: SCOUTING (MAP) ---
-    "scout_system": """Du bist ein analytischer Content-Scout für Social Media Reels. 
-Deine Aufgabe ist es, ein Predigt-Transkript zu analysieren und virale Hooks zu extrahieren (tiefgründige, provokante oder humorvolle Sätze).
+Gib 3 bis 8 Highlights zurück. "start" und "end" müssen Floats (Sekunden) sein.
+"""
 
-REGELN:
-1. Die Sätze müssen komplett für sich alleine stehen können.
-2. Entferne Füllwörter am Satzanfang (Und, Aber, Denn).
-3. Behalte den exakten Zeitstempel des Satzanfangs bei.
-4. Wähle nur Sätze, die eine starke emotionale oder intellektuelle Reaktion auslösen.
-5. Bestimme nicht nur den Startpunkt, sondern lies im Transkript weiter und bestimme den exakten Zeitstempel, an dem der Gedanke (oder Satz) logisch endet.""",
-    
-    "scout_user": "Hier ist das Transkript:\n{chunk}",
+JSON_HIGHLIGHT_USER_PROMPT = """Hier ist das Video-Transkript mit Zeitstempeln in Sekunden:
 
-    # --- PHASE 2: EDITING (REDUCE) ---
-    "editor_system": """Du bist der finale Redakteur für virale Video-Highlights.
-Deine Aufgabe ist es, aus einer großen Liste von Kandidaten die stärksten Zitate auszuwählen.
+{transcript}
 
-REGELN:
-1. Achte auf eine exzellente Mischung aus Inspiration, Provokation und Alltagsrelevanz.
-2. Verändere den Wortlaut der Zitate nicht.
-3. Wähle EXAKT die angeforderte Anzahl an Highlights aus.""",
+Extrahiere die besten Highlights und antworte AUSSCHLIESSLICH mit dem geforderten JSON.
+"""
 
-    "editor_user": "Wähle exakt {n} Highlights aus dieser Liste aus:\n{longlist}",
+# Diese werden weiterhin für Textzusammenfassungen genutzt
+SUMMARY_CHUNK_PROMPT = """Fasse diesen Textabschnitt präzise zusammen.
+Schreibe einen fließenden Text (keine stumpfen Bulletpoints), der den Bogen gut einfängt.
+Abschnitt:\n{chunk}"""
 
-    # --- SUMMARY ---
-    "chunk": """Fasse diesen Textabschnitt präzise und elegant zusammen.
-Schreibe einen fließenden, gut lesbaren Text (keine stumpfen Bulletpoints), der den gedanklichen Bogen des Sprechers gut einfängt.
-Abschnitt:\n{chunk}""",
-    "merge": """Führe diese Teil-Zusammenfassungen zu einer hochwertigen, zusammenhängenden Predigt-Zusammenfassung zusammen.
-Gliedere den Text in sinnvolle, thematische Absätze und schreibe auf hohem sprachlichen Niveau. Keine Aufzählungszeichen, sondern schöner Fließtext.
+SUMMARY_MERGE_PROMPT = """Führe diese Teil-Zusammenfassungen zu einer hochwertigen Gesamt-Zusammenfassung zusammen.
+Gliedere den Text in sinnvolle, thematische Absätze.
 Textteile:\n{parts}"""
-}
 
 # ==============================================================================
 # 2. TITLE GENERATION (build_highlight_spans)

@@ -224,48 +224,47 @@ class FaceTracker:
     def smooth_track(
         self, 
         track: List[Tuple[float, float, float]], 
-        window_length: int = 31, 
-        polyorder: int = 3, 
-        deadzone_px: float = 20.0
+        window_length: int = 51, 
+        polyorder: int = 2, 
+        deadzone_px: float = 80.0  # Erhöhte Deadzone: Ignoriert starkes Kopfwackeln
     ) -> List[Tuple[float, float, float]]:
         """
-        Beruhigt Tracking-Daten durch eine Kombination aus Savitzky-Golay-Filter (Rauschunterdrückung)
-        und einer Hysterese (Deadzone), um Micro-Jitter zu eliminieren.
+        Beruhigt Tracking-Daten durch einen Savitzky-Golay-Filter und einen 
+        'Cinematic Lazy Follow' mit Soft-Deadzone.
         """
         if not track:
             return []
         
-        # 1. Savitzky-Golay Filter (SCIPY)
+        # 1. Savitzky-Golay Filter (Grundrauschen filtern)
         try:
             import numpy as np
             from scipy.signal import savgol_filter
             
-            # Konvertierung in Arrays für Vektorisierung
             times = np.array([p[0] for p in track])
             xs = np.array([p[1] for p in track])
             ys = np.array([p[2] for p in track])
             
-            # Prüfen ob Track lang genug für SG-Filter (window_length muss ungerade und > polyorder sein)
             if len(track) >= window_length:
                 xs = savgol_filter(xs, window_length, polyorder)
                 ys = savgol_filter(ys, window_length, polyorder)
             elif len(track) > polyorder + 1:
-                # Dynamische Fenstergröße falls Track zu kurz
                 w = len(track) if len(track) % 2 != 0 else len(track) - 1
                 if w > polyorder:
                     xs = savgol_filter(xs, w, polyorder)
                     ys = savgol_filter(ys, w, polyorder)
         except ImportError:
-            # Fallback falls scipy/numpy nicht installiert sind
             times = [p[0] for p in track]
             xs = [p[1] for p in track]
             ys = [p[2] for p in track]
         
-        # 2. Hysterese / Deadzone (Stabilität)
-        # Die Kamera verharrt auf ihrer Position, bis die Abweichung die Deadzone überschreitet
+        # 2. Cinematic Lazy Follow mit Soft Deadzone
         smoothed_track = []
         if len(xs) > 0:
             cam_x, cam_y = xs[0], ys[0]
+            
+            # Extrem träger Faktor (zuvor 0.15). 0.03 macht Schwenks sehr langsam und majestätisch.
+            smoothing_factor = 0.03 
+            
             for i in range(len(xs)):
                 t = times[i]
                 target_x, target_y = xs[i], ys[i]
@@ -274,16 +273,45 @@ class FaceTracker:
                 dy = target_y - cam_y
                 dist = (dx**2 + dy**2)**0.5
                 
+                # Die Kamera bewegt sich NUR, wenn die Person die Deadzone verlässt
                 if dist > deadzone_px:
-                    # Wir ziehen die Kamera sanft nach, so dass sie wieder am Rand der Deadzone liegt
-                    ratio = (dist - deadzone_px) / dist
-                    cam_x += dx * ratio
-                    cam_y += dy * ratio
+                    # Wir ziehen die Kamera nicht direkt ins Gesicht, 
+                    # sondern nur sanft an den Rand der erlaubten Zone
+                    pull_x = target_x - (dx / dist) * deadzone_px
+                    pull_y = target_y - (dy / dist) * deadzone_px
+                    
+                    cam_x += (pull_x - cam_x) * smoothing_factor
+                    cam_y += (pull_y - cam_y) * smoothing_factor
                 
-                # Wenn dist <= deadzone_px: cam_x/cam_y bleiben identisch zum vorherigen Punkt
                 smoothed_track.append((float(t), float(cam_x), float(cam_y)))
                 
         return smoothed_track
+
+    def interpolate_track_to_fps(self, track: List[Tuple[float, float, float]], target_fps: float = 30.0) -> List[Tuple[float, float, float]]:
+        """
+        Interpoliert die Tracking-Punkte linear auf eine feste Framerate (z.B. 30 FPS).
+        Das zwingt FFmpeg dazu, bei jedem Frame weich zu aktualisieren, statt zwischen 
+        weit auseinanderliegenden Keyframes zu springen.
+        """
+        if not track or len(track) < 2:
+            return track
+            
+        import numpy as np
+        
+        times = [p[0] for p in track]
+        xs = [p[1] for p in track]
+        ys = [p[2] for p in track]
+        
+        # Berechne die neue, dichte Zeitachse
+        start_t, end_t = times[0], times[-1]
+        num_frames = max(2, int((end_t - start_t) * target_fps) + 1)
+        new_times = np.linspace(start_t, end_t, num_frames)
+        
+        # Lineare Interpolation der X- und Y-Koordinaten
+        new_xs = np.interp(new_times, times, xs)
+        new_ys = np.interp(new_times, times, ys)
+        
+        return [(float(t), float(x), float(y)) for t, x, y in zip(new_times, new_xs, new_ys)]
 
     def reduce_keyframes(self, track: List[Tuple[float, float, float]], max_keys: int = 40) -> List[Tuple[float, float, float]]:
         """Erhöht die Keyframe-Dichte für weichere FFmpeg-Interpolation."""

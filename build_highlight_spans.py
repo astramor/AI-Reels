@@ -604,7 +604,10 @@ def main():
     hl_path = pathlib.Path(args.highlights)
     longlist_path = hl_path.parent / "highlights_longlist.md"
 
-    if longlist_path.exists():
+    if hl_path.suffix.lower() == ".json":
+        print(f"✅ Nutze JSON Highlights: {hl_path.name}")
+        entries = parse_highlights_json(hl_path)
+    elif longlist_path.exists():
         print(f"✅ Nutze Longlist-Beschreibungen: {longlist_path.name}")
         entries = parse_longlist(longlist_path)
     else:
@@ -733,6 +736,22 @@ def main():
 
     # Output
     out_md_path = pathlib.Path(args.out_md)
+    out_md_path.write_text("\n".join(lines), encoding="utf-8")
+
+    captions_file = out_md_path.parent / "reels_content.md"
+    captions_file.write_text("\n".join(captions_output), encoding="utf-8")
+    print(f"📄 Captions gespeichert in: {captions_file.name}")
+
+    if args.out_json:
+        pathlib.Path(args.out_json).write_text(
+            json.dumps(spans, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    print("Fertig.")
+
+
+if __name__ == "__main__":
+    main()
+path = pathlib.Path(args.out_md)
     out_md_path.write_text("\n".join(lines), encoding="utf-8")
 
     captions_file = out_md_path.parent / "reels_content.md"

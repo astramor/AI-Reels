@@ -5,13 +5,19 @@ import json
 import pathlib
 import re
 import time
-from datetime import timedelta
-from typing import List, Optional, Tuple, Generator
+from typing import List, Tuple, Generator, Dict
 
 import srt
 from loguru import logger
-from core.time_utils import timedelta_to_hms
-from core.prompts import OLLAMA_SUMMARIZER_PROMPTS, GEMINI_SUMMARIZER_PROMPTS
+from core.prompts import (
+    JSON_HIGHLIGHT_SYSTEM_PROMPT,
+    JSON_HIGHLIGHT_USER_PROMPT,
+    SUMMARY_CHUNK_PROMPT,
+    SUMMARY_MERGE_PROMPT
+)
+from domains.llm.errors import LLMApiError, LLMInvalidJsonError
+from domains.highlights.errors import HighlightValidationError, EmptyTranscriptError
+from domains.highlights.models import HighlightPayload
 
 try:
     from ollama import Client as OllamaClient
@@ -27,8 +33,8 @@ except ImportError:
 
 class SermonSummarizer:
     """
-    Klasse zur Zusammenfassung von Predigten und Extraktion von Highlights mittels LLMs.
-    Unterstützt Ollama und Gemini.
+    Klasse zur Zusammenfassung von Videos und Extraktion von Highlights mittels LLMs.
+    Unterstützt Ollama und Gemini. Liefert nun konsequent striktes JSON.
     """
 
     def __init__(self, settings):
@@ -42,77 +48,121 @@ class SermonSummarizer:
                 raise ImportError("Bitte `pip install google-genai` für Gemini-Support.")
             api_key = settings.gemini_api_key.get_secret_value() if settings.gemini_api_key else ""
             self.client = genai.Client(api_key=api_key)
-            self.prompts = GEMINI_SUMMARIZER_PROMPTS
             logger.info(f"Gemini Mode: {self.model_name}")
         else:
             self.model_name = settings.llm_model
             if not OllamaClient:
                 raise ImportError("Bitte `pip install ollama` für Ollama-Support.")
             self.client = OllamaClient(host="http://127.0.0.1:11434")
-            self.prompts = OLLAMA_SUMMARIZER_PROMPTS
             logger.info(f"Ollama Mode: {self.model_name}")
 
     def _get_highlight_schema(self) -> types.Schema:
-        """Definiert die exakte JSON-Struktur, die wir von Gemini erwarten."""
+        """Definiert die exakte JSON-Struktur, die wir von Gemini erwarten (Structured Outputs)."""
         return types.Schema(
-            type=types.Type.ARRAY,
-            description="Eine Liste der besten Video-Highlights.",
-            items=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "start_timestamp": types.Schema(
-                        type=types.Type.STRING, 
-                        description="Der exakte Start-Zeitstempel im Format HH:MM:SS"
-                    ),
-                    "end_timestamp": types.Schema(
-                        type=types.Type.STRING, 
-                        description="Der exakte End-Zeitstempel im Format HH:MM:SS"
-                    ),
-                    "quote": types.Schema(
-                        type=types.Type.STRING, 
-                        description="Das bereinigte, virale Zitat"
+            type=types.Type.OBJECT,
+            properties={
+                "highlights": types.Schema(
+                    type=types.Type.ARRAY,
+                    description="Eine Liste der besten Video-Highlights.",
+                    items=types.Schema(
+                        type=types.Type.OBJECT,
+                        properties={
+                            "title": types.Schema(type=types.Type.STRING, description="Kurzer, packender Titel"),
+                            "start": types.Schema(type=types.Type.NUMBER, description="Startzeit in Sekunden (Float)"),
+                            "end": types.Schema(type=types.Type.NUMBER, description="Endzeit in Sekunden (Float)"),
+                            "reason": types.Schema(type=types.Type.STRING, description="Warum dieser Clip stark ist"),
+                            "hook": types.Schema(type=types.Type.STRING, description="Optionaler Einstiegssatz"),
+                            "confidence": types.Schema(type=types.Type.NUMBER, description="Confidence (0.0-1.0)")
+                        },
+                        required=["title", "start", "end", "reason"]
                     )
-                },
-                required=["start_timestamp", "end_timestamp", "quote"]
-            )
+                )
+            },
+            required=["highlights"]
         )
 
-    def extract_highlights_gemini(self, sys_prompt: str, user_prompt: str, temp: float = 0.2) -> list:
+    def extract_json_from_llm_response(self, raw_text: str) -> dict:
         """
-        Führt den Gemini-Aufruf mit striktem JSON-Schema durch.
-        Gibt eine Liste von Dictionaries zurück: [{'start_timestamp': '...', 'end_timestamp': '...', 'quote': '...'}]
+        Extrahiert ein JSON-Objekt aus einem potenziell unsauberen LLM-Output.
+        Entfernt Markdown-Formatierungen wie ```json ... ```.
         """
-        if not self.is_gemini:
-            raise NotImplementedError("Diese Methode erfordert den Gemini Provider.")
+        if not raw_text:
+            raise LLMInvalidJsonError("LLM-Ausgabe war leer.")
             
+        # 1. Versuche direkten Parse (falls der LLM brav war)
         try:
-            time.sleep(1) # Rate limiting safety
-            res = self.client.models.generate_content(
-                model=self.model_name,
-                contents=user_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=sys_prompt,
-                    temperature=temp,
-                    response_mime_type="application/json",
-                    response_schema=self._get_highlight_schema(),
-                ),
-            )
-            return json.loads(res.text)
-        except Exception as e:
-            logger.error(f"Gemini API / Parsing Fehler: {e}")
-            return []
+            return json.loads(raw_text)
+        except json.JSONDecodeError:
+            pass
+
+        # 2. Suche nach Markdown JSON-Blöcken
+        match = re.search(r"```(?:json)?(.*?)```", raw_text, re.DOTALL | re.IGNORECASE)
+        if match:
+            try:
+                return json.loads(match.group(1).strip())
+            except json.JSONDecodeError:
+                pass
+
+        # 3. Fallback: Suche nach dem ersten { und dem letzten }
+        start_idx = raw_text.find("{")
+        end_idx = raw_text.rfind("}")
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            try:
+                return json.loads(raw_text[start_idx:end_idx+1])
+            except json.JSONDecodeError as e:
+                raise LLMInvalidJsonError(f"Konnte JSON auch aus Fallback-Bereich nicht parsen: {e}")
+                
+        raise LLMInvalidJsonError("Kein JSON-Objekt im Text gefunden.")
+
+    def chat_json(self, sys_p: str, user_p: str, temp: float = 0.2) -> str:
+        """Sendet einen Request an das LLM mit Anweisung für JSON-Ausgabe."""
+        if self.is_gemini:
+            try:
+                time.sleep(1) # Rate limiting / Safety
+                res = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=user_p,
+                    config=types.GenerateContentConfig(
+                        system_instruction=sys_p,
+                        temperature=temp,
+                        response_mime_type="application/json",
+                        response_schema=self._get_highlight_schema(),
+                    ),
+                )
+                return res.text
+            except Exception as e:
+                raise LLMApiError(f"Gemini API Fehler: {e}")
+        else:
+            try:
+                options = {
+                    "temperature": temp,
+                    "num_ctx": 16384, # Größerer Kontext für lange Transkripte
+                    "num_predict": 2048
+                }
+                resp = self.client.chat(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": sys_p},
+                        {"role": "user", "content": user_p},
+                    ],
+                    options=options,
+                    format="json" # Ollama JSON mode
+                )
+                return resp["message"]["content"]
+            except Exception as e:
+                raise LLMApiError(f"Ollama API Fehler: {e}")
 
     def _clean_thinking(self, text: str) -> str:
         if not text:
             return ""
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-        text = re.sub(r"<think>.*", "", text, flags=re.DOTALL)
-        return text.strip()
+        return re.sub(r"<think>.*", "", text, flags=re.DOTALL).strip()
 
     def chat(self, sys_p: str, user_p: str, temp: float = 0.1) -> str:
+        """Klassischer Text-Chat (wird noch für Summary benutzt)."""
         if self.is_gemini:
             try:
-                time.sleep(1) # Rate limiting / Safety
+                time.sleep(1)
                 res = self.client.models.generate_content(
                     model=self.model_name,
                     contents=user_p,
@@ -126,19 +176,13 @@ class SermonSummarizer:
                 return ""
         else:
             try:
-                options = {
-                    "temperature": temp,
-                    "num_ctx": 8192,
-                    "num_predict": 1500,
-                    "repeat_penalty": 1.15,
-                }
                 resp = self.client.chat(
                     model=self.model_name,
                     messages=[
                         {"role": "system", "content": sys_p},
                         {"role": "user", "content": user_p},
                     ],
-                    options=options,
+                    options={"temperature": temp, "num_ctx": 8192},
                 )
                 return self._clean_thinking(resp["message"]["content"])
             except Exception as e:
@@ -150,7 +194,6 @@ class SermonSummarizer:
         if not self.is_gemini and self.client:
             logger.info(f"Unloading model {self.model_name} from VRAM...")
             try:
-                # Ollama Trick: keep_alive=0 entlädt das Modell sofort
                 self.client.generate(model=self.model_name, keep_alive=0)
             except Exception as e:
                 logger.warning(f"Modell-Entladen fehlgeschlagen: {e}")
@@ -159,182 +202,69 @@ class SermonSummarizer:
         for it in srt.parse(srt_path.read_text(encoding="utf-8")):
             yield it, re.sub(r"\s+", " ", it.content.replace("\n", " ").strip())
 
-    def _build_highlight_candidates(self, items: List[Tuple[srt.Subtitle, str]]) -> List[str]:
-        return [
-            f"[{timedelta_to_hms(it.start)}] {txt[:200]}"
-            for it, txt in items
-            if len(txt.split()) > 5
-        ]
+    def validate_highlight_payload(self, payload: dict) -> HighlightPayload:
+        """Validiert das geparste JSON-Dictionary mittels Pydantic."""
+        try:
+            return HighlightPayload.model_validate(payload)
+        except Exception as e:
+            raise HighlightValidationError(f"JSON erfüllt nicht das Pydantic Schema: {e}")
 
-    def _find_smart_end(self, start_sec: int, items: List[Tuple[srt.Subtitle, str]], min_dur: int = 18, max_dur: int = 60) -> str:
-        """Findet das nächste logische Satzende im SRT für einen Smart Cut."""
-        end_sec = start_sec + 20 # Fallback
-        for it, txt in items:
-            s_end = it.end.total_seconds()
-            if s_end > start_sec + min_dur:
-                if re.search(r"[.!?]", txt):
-                    end_sec = int(s_end)
-                    break
-            if s_end > start_sec + max_dur:
-                end_sec = int(s_end)
-                break
-        
-        # In HMS umwandeln
-        td = timedelta(seconds=end_sec)
-        return timedelta_to_hms(td)
-
-    def _sanitize_highlights(self, text: str, items: List[Tuple[srt.Subtitle, str]], tol: int = 8) -> List[str]:
-        out = []
-        sec_map = {int(it.start.total_seconds()): timedelta_to_hms(it.start) for it, txt in items}
-        line_re = re.compile(r".*?\[(\d{1,2})[:.](\d{1,2})[:.]?(\d{1,2})?\].*?[:\s]+(.*)")
-
-        for line in text.splitlines():
-            if "Zitat:" in line:
-                line = line.replace("Das Zitat:", "")
-            m = line_re.match(line)
-            if not m:
-                continue
-            h, m_val, s_val, txt = (
-                int(m.group(1)),
-                int(m.group(2)),
-                int(m.group(3) or 0),
-                m.group(4),
-            )
-            sec = h * 3600 + m_val * 60 + s_val
-
-            used = set()
-            for l in out:
-                 found_ts = re.search(r"\[(\d{1,2}):(\d{1,2}):(\d{1,2})\]", l)
-                 if found_ts:
-                     used.add(int(found_ts.group(1))*3600 + int(found_ts.group(2))*60 + int(found_ts.group(3)))
-            
-            if any(s in used for s in range(sec - 15, sec + 15)):
-                continue
-
-            found_start = None
-            for off in range(-tol, tol + 1):
-                if (sec + off) in sec_map:
-                    found_start = sec_map[sec + off]
-                    start_sec_actual = sec + off
-                    break
-
-            if found_start:
-                clean = (
-                    re.sub(r"^(Und|Aber|Denn)\s+", "", txt, flags=re.IGNORECASE)
-                    .strip('"')
-                    .strip()
-                )
-                if len(clean) > 8:
-                    # SMART CUT LOGIC HIER
-                    found_end = self._find_smart_end(start_sec_actual, items)
-                    out.append(f"- [{found_start} -> {found_end}] {clean}")
-        return out
-
-    def process(self, srt_path_str: str, out_dir_str: str, max_highlights: int = 8, strict_snap_tol: int = 8):
+    def process(self, srt_path_str: str, out_dir_str: str, max_highlights: int = 8):
         srt_path = pathlib.Path(srt_path_str)
         out_dir = pathlib.Path(out_dir_str)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         items = list(self._srt_items(srt_path))
-        transcript = "\n".join([f"[{timedelta_to_hms(it.start)}] {txt}" for it, txt in items])
-        (out_dir / "transcript_predigt.txt").write_text(transcript, encoding="utf-8")
+        if not items:
+            raise EmptyTranscriptError("Das SRT-Transkript ist leer.")
 
+        # Für JSON-Prompt nutzen wir Floats, da das LLM Floats zurückgeben soll.
+        transcript_for_json = "\n".join([f"[{it.start.total_seconds():.2f}s] {txt}" for it, txt in items])
+        (out_dir / "transcript_predigt.txt").write_text(transcript_for_json, encoding="utf-8")
+
+        # 1. Highlights via strict JSON
+        logger.info("--- Highlights Scouting (Strict JSON) ---")
+        user_msg = JSON_HIGHLIGHT_USER_PROMPT.format(transcript=transcript_for_json)
+        
+        try:
+            logger.info("Frage LLM nach JSON-Highlights...")
+            raw_response = self.chat_json(JSON_HIGHLIGHT_SYSTEM_PROMPT, user_msg, temp=0.2)
+            
+            # Artefakt 1: Raw LLM Response
+            (out_dir / "highlights_raw_llm.txt").write_text(raw_response, encoding="utf-8")
+            
+            # Extrahieren & Bereinigen
+            parsed_json = self.extract_json_from_llm_response(raw_response)
+            
+            # Artefakt 2: Parsed JSON
+            (out_dir / "highlights_parsed.json").write_text(json.dumps(parsed_json, indent=2, ensure_ascii=False), encoding="utf-8")
+            
+            # Validieren via Pydantic
+            validated_payload = self.validate_highlight_payload(parsed_json)
+            
+            # Artefakt 3: Validated Highlights (Final)
+            final_json_path = out_dir / "highlights.json"
+            final_json_path.write_text(validated_payload.model_dump_json(indent=2), encoding="utf-8")
+            logger.success(f"Erfolgreich {len(validated_payload.highlights)} valide Highlights generiert.")
+            
+        except (LLMApiError, LLMInvalidJsonError, HighlightValidationError) as e:
+            logger.error(f"Fehler bei der Highlight-Generierung: {e}")
+            raise NoValidHighlightsError(f"Abbruch: {e}")
+
+        # 2. Summary erstellen (Beibehalten der klassischen Logik)
         c_size = 40000 if self.is_gemini else 6000
-
-        # 1. Summary erstellen
-        chunks = [transcript[i : i + c_size] for i in range(0, len(transcript), c_size)]
+        chunks = [transcript_for_json[i : i + c_size] for i in range(0, len(transcript_for_json), c_size)]
         parts = []
         logger.info(f"--- Summary ({len(chunks)} Chunks) ---")
         for c in chunks:
-            parts.append(
-                self.chat("Du bist Redakteur.", self.prompts["chunk"].format(chunk=c), temp=0.1)
-            )
+            parts.append(self.chat("Du bist Redakteur.", SUMMARY_CHUNK_PROMPT.format(chunk=c), temp=0.1))
 
-        full_sum = (
-            parts[0]
-            if len(parts) == 1
-            else self.chat(
-                "Du bist Redakteur.", self.prompts["merge"].format(parts="\n".join(parts)), temp=0.1
-            )
+        full_sum = parts[0] if len(parts) == 1 else self.chat(
+            "Du bist Redakteur.", SUMMARY_MERGE_PROMPT.format(parts="\n".join(parts)), temp=0.1
         )
         (out_dir / "summary.md").write_text(full_sum, encoding="utf-8")
 
-        # 2. Highlights scouting
-        logger.info("--- Highlights Scouting ---")
-        hl_chunks = []
-        curr, l = [], 0
-        cands = self._build_highlight_candidates(items)
-        for c in cands:
-            if l + len(c) > c_size:
-                hl_chunks.append("\n".join(curr))
-                curr, l = [], 0
-            curr.append(c)
-            l += len(c)
-        if curr:
-            hl_chunks.append("\n".join(curr))
-
-        # --- Highlights scouting (Map) ---
-        if self.is_gemini:
-            longlist_objects = []
-            for i, c in enumerate(hl_chunks):
-                logger.info(f"Scout Chunk {i + 1}...")
-                user_msg = self.prompts["scout_user"].format(chunk=c)
-                
-                chunk_results = self.extract_highlights_gemini(
-                    sys_prompt=self.prompts["scout_system"],
-                    user_prompt=user_msg,
-                    temp=0.3
-                )
-                longlist_objects.extend(chunk_results)
-
-            # JSON als String formatieren, um ihn in die nächste Prompt-Stufe zu geben
-            longlist_text = json.dumps(longlist_objects, indent=2, ensure_ascii=False)
-
-            # --- Reduce anwenden (Editor) ---
-            logger.info(f"Reducing ({len(longlist_objects)} Candidates)...")
-            user_msg_reduce = self.prompts["editor_user"].format(n=max_highlights, longlist=longlist_text)
-            
-            final_objects = self.extract_highlights_gemini(
-                sys_prompt=self.prompts["editor_system"],
-                user_prompt=user_msg_reduce,
-                temp=0.2
-            )
-
-            # Saubere Markdown-Datei mit Start -> Ende Syntax generieren
-            final_clean = [f"- [{obj['start_timestamp']} -> {obj['end_timestamp']}] {obj['quote']}" for obj in final_objects]
-            (out_dir / "highlights.md").write_text("\n".join(final_clean), encoding="utf-8")
-        else:
-            longlist = []
-            for i, c in enumerate(hl_chunks):
-                logger.info(f"Scout Chunk {i + 1}...")
-                res = self.chat("Scout", self.prompts["map"].format(block=c), temp=0.3)
-                longlist.extend([l for l in res.splitlines() if "[" in l])
-
-            (out_dir / "highlights_longlist.md").write_text(
-                "\n".join(longlist), encoding="utf-8"
-            )
-
-            # 3. Reduce anwenden
-            logger.info(f"Reducing ({len(longlist)} Candidates)...")
-            final_raw = self.chat(
-                "Editor",
-                self.prompts["reduce"].format(longlist="\n".join(longlist), n=max_highlights),
-                temp=0.2,
-            )
-            final_clean = self._sanitize_highlights(final_raw, items, strict_snap_tol)
-
-            if len(final_clean) < 6:
-                logger.warning("Auffüllen aus Longlist...")
-                more = self._sanitize_highlights("\n".join(longlist), items)
-                for m in more:
-                    if len(final_clean) >= 6:
-                        break
-                    if m not in final_clean:
-                        final_clean.append(m)
-
-            (out_dir / "highlights.md").write_text("\n".join(final_clean), encoding="utf-8")
-        logger.info("Zusammenfassung und Highlights erfolgreich erstellt.")
         return {
             "summary_path": out_dir / "summary.md",
-            "highlights_path": out_dir / "highlights.md"
+            "highlights_path": final_json_path
         }

@@ -452,23 +452,33 @@ def execute_transcription(vid, stem, out_whisper_dir, args):
         "whisperx",
         str(vid),
         "--model",
-        args.whisper_model,
+        settings.whisper_model,
         "--output_dir",
         str(out_whisper_dir),
         "--output_format",
         "all",
-        "--language",
-        args.whisper_language,
+        "--device",
+        settings.whisper_device,
+        "--compute_type",
+        settings.whisper_compute_type,
+        "--batch_size",
+        str(settings.whisper_batch_size),
+        "--vad_onset",
+        str(settings.vad_onset),
+        "--vad_offset",
+        str(settings.vad_offset),
     ]
-    if args.whisper_device:
-        w_cmd += ["--device", args.whisper_device]
-    if args.whisper_compute_type:
-        w_cmd += ["--compute_type", args.whisper_compute_type]
-    if args.whisper_batch_size:
-        w_cmd += ["--batch_size", str(args.whisper_batch_size)]
-    if args.whisper_vad:
-        w_cmd.append("--vad_filter")
-    
+    if settings.whisper_language:
+        w_cmd.extend(["--language", settings.whisper_language])
+    if settings.align_model:
+        w_cmd.extend(["--align_model", settings.align_model])
+    if settings.diarization_enabled:
+        w_cmd.append("--diarize")
+        if settings.min_speakers:
+            w_cmd.extend(["--min_speakers", str(settings.min_speakers)])
+        if settings.max_speakers:
+            w_cmd.extend(["--max_speakers", str(settings.max_speakers)])
+            
     env = os.environ.copy()
     if args.no_cudnn:
         env["CT2_USE_CUDNN"] = "0"
@@ -663,30 +673,39 @@ def main():
 
         summ_dir = out_summ / stem
         summ_dir.mkdir(parents=True, exist_ok=True)
-        hl_md = summ_dir / "highlights.md"
+        hl_json = summ_dir / "highlights.json"
         predigt_srt = summ_dir / f"{stem}_predigt.srt"
 
-        if not (hl_md.exists() and predigt_srt.exists()) or args.force:
+        if not (hl_json.exists() and predigt_srt.exists()) or args.force:
             execute_summarizer(srt_file, summ_dir, predigt_srt, defaults, args)
 
         if not predigt_srt.exists() and srt_file.exists():
             logger.info(f"⚠️ ACHTUNG: '{predigt_srt.name}' wurde nicht erstellt. Nutze Fallback.")
             shutil.copy(srt_file, predigt_srt)
 
+        # Diese Dateien sind die Ausgaben von build_highlight_spans.py (Title/Captions)
         spans_md = summ_dir / "highlight_spans.md"
         spans_json = summ_dir / "reel_spans.json"
 
         if args.build_spans:
-            if not spans_md.exists() or args.force:
-                execute_span_builder(hl_md, predigt_srt, spans_md, spans_json, args)
+            if not spans_json.exists() or args.force:
+                execute_span_builder(hl_json, predigt_srt, spans_md, spans_json, args)
             else:
                 logger.info("ℹ️  Spans vorhanden.")
 
             if args.confirm_spans:
-                input(f"\n✋ PAUSE: Prüfe '{spans_md}'. ENTER weiter...")
+                input(f"\n✋ PAUSE: Prüfe '{spans_json}'. ENTER weiter...")
 
-        if args.render and spans_md.exists():
-            execute_render_orchestration(vid, stem, summ_dir, json_file, predigt_srt, spans_md, out_reels, args)
+        if args.render and spans_json.exists():
+            execute_render_orchestration(vid, stem, summ_dir, json_file, predigt_srt, spans_json, out_reels, args)
+
+    logger.info("Fertig.")
+
+
+if __name__ == "__main__":
+    main()
+
+          execute_render_orchestration(vid, stem, summ_dir, json_file, predigt_srt, spans_md, out_reels, args)
 
     logger.info("Fertig.")
 

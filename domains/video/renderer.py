@@ -100,9 +100,10 @@ class FFmpegRenderer:
         sw = int(round(src_w * s)) // 2 * 2
         sh = int(round(src_h * s)) // 2 * 2
 
-        # 1. Keyframes einschränken (FFmpeg Filter-Limit vermeiden)
-        # Wir nehmen maximal 20 Keyframes, um O(N) Overhead zu verhindern.
-        max_keys = 20
+        # 1. Keyframes massiv anheben
+        # Dank der balancierten Baum-Interpolation unten verträgt FFmpeg auch riesige Filter-Strings.
+        # Wir erlauben bis zu 900 Punkte (reicht für 30 Sekunden bei 30 FPS butterweich).
+        max_keys = 900
         if len(track) > max_keys:
             step = len(track) / (max_keys - 1)
             indices = [int(i * step) for i in range(max_keys - 1)] + [len(track) - 1]
@@ -165,7 +166,7 @@ class FFmpegRenderer:
         subtitles: Optional[Path] = None,
         overlay_title: Optional[str] = None,
         reencode: bool = True,
-        video_codec: str = "libx264",
+        video_codec: str = "libx265",
         audio_codec: str = "aac",
         target_w: Optional[int] = None,
         target_h: Optional[int] = None,
