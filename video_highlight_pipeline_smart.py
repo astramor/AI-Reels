@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 from loguru import logger
 
-from domains.video.renderer import FFmpegRenderer
+from domains.video.renderer import (
+    FFmpegRenderer, 
+    RenderJob, 
+    run_batch_render
+)
 from domains.vision.tracker import FaceTracker
 from domains.transcription.processor import SubtitleProcessor
 from domains.highlights.parser import HighlightParser, Highlight
@@ -81,7 +85,7 @@ def get_random_music(music_dir: Path) -> Optional[Path]:
 # 2. CORE CLIP PROCESSING
 # ==============================================================================
 
-def process_clip(
+def prepare_render_job(
     idx: int,
     h: Highlight,
     video_path: Path,
@@ -97,9 +101,9 @@ def process_clip(
     sub_processor: SubtitleProcessor,
     music_file: Optional[Path],
     subtitles_path: Optional[Path]
-):
+) -> RenderJob:
     """
-    Verarbeitet einen einzelnen Highlight-Clip: Timing, Tracking, Karaoke, Rendering.
+    Bereitet einen einzelnen Render-Job vor: Timing, Tracking, Karaoke.
     """
     # 1. Timing-Berechnung
     approx_start = max(0, h.start - settings.preroll)
@@ -206,34 +210,36 @@ def process_clip(
             cover_override = renderer.cover_scale_crop_filter_with_center(src_w, src_h, target_w, target_h, cx, cy)
 
     # 5. FFmpeg Command & Rendering
-    cmd = renderer.build_ffmpeg_cmd(
+    kwargs = {
+        "ass_file": ass_file,
+        "subtitles": subtitles_path,
+        "overlay_title": title_text,
+        "reencode": settings.reencode,
+        "video_codec": "h264_nvenc" if settings.nvenc else "libx265",
+        "target_w": target_w,
+        "target_h": target_h,
+        "cover_filter_override": cover_override,
+        "loudnorm": settings.loudnorm,
+        "fade_in": settings.fade_in,
+        "fade_in_sec": settings.fade_in_sec,
+        "fade_out": settings.fade_out,
+        "fade_sec": settings.fade_sec,
+        "overlay_margin_top": settings.overlay_margin_top,
+        "overlay_fontsize": settings.overlay_fontsize,
+        "color_grading": settings.color_grade,
+        "music_file": music_file,
+        "music_volume": settings.music_volume,
+        "blur_bg": settings.blur_bg,
+    }
+
+    return RenderJob(
         input_video=video_path,
         start_ts=start_abs,
         duration=dur,
         out_file=out_file,
-        ass_file=ass_file,
-        subtitles=subtitles_path,
-        overlay_title=title_text,
-        reencode=settings.reencode,
-        video_codec="h264_nvenc" if settings.nvenc else "libx265",
-        target_w=target_w,
-        target_h=target_h,
-        cover_filter_override=cover_override,
-        loudnorm=settings.loudnorm,
-        fade_in=settings.fade_in,
-        fade_in_sec=settings.fade_in_sec,
-        fade_out=settings.fade_out,
-        fade_sec=settings.fade_sec,
-        overlay_margin_top=settings.overlay_margin_top,
-        overlay_fontsize=settings.overlay_fontsize,
-        color_grading=settings.color_grade,
-        music_file=music_file,
-        music_volume=settings.music_volume,
-        blur_bg=settings.blur_bg,
+        job_id=str(idx),
+        kwargs=kwargs
     )
-
-    renderer.run_ffmpeg(cmd)
-    logger.success(f"Clip {idx} erfolgreich gerendert: {out_file.name}")
 
 # ==============================================================================
 # 3. PIPELINE ORCHESTRATION
@@ -367,12 +373,16 @@ def run_smart_pipeline(
     save_json(am.get_path("render_plan.json"), render_plan)
     am.save_metadata({"pipeline_version": "2.2", "model": settings.whisper_model})
 
-    # 5. Iterative Verarbeitung
+    # 5. Iterative Vorbereitung & Batch Rendering
     t_start_render = time.time()
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir_path = Path(temp_dir)
+        render_jobs = []
+        
+        # Phase 1: Vorbereitung (Tracking etc.) - Sequentiell, da Tracking auch GPU nutzt
+        logger.info("🎬 Bereite Render-Jobs vor (Tracking & Analyse)...")
         for idx, h in enumerate(marks, start=1):
-            process_clip(
+            job = prepare_render_job(
                 idx=idx,
                 h=h,
                 video_path=video,
@@ -389,6 +399,11 @@ def run_smart_pipeline(
                 music_file=music_file,
                 subtitles_path=subtitles
             )
+            render_jobs.append(job)
+            
+        # Phase 2: Batch Rendering - Parallel mit GPU-Semaphore
+        logger.info(f"⚡ Starte paralleles Batch-Rendering für {len(render_jobs)} Clips...")
+        run_batch_render(render_jobs)
             
     am.log_step("Video Rendering", "SUCCESS", duration_sec=time.time() - t_start_render, details=f"{len(marks)} clips rendered")
 

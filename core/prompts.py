@@ -13,20 +13,20 @@ Konsolidiert aus summarizer.py, srt_summarizer_local.py und build_highlight_span
 # ==============================================================================
 
 JSON_HIGHLIGHT_SYSTEM_PROMPT = """Du bist ein analytischer Content-Scout und erfahrener Social Media Editor für Video-Reels.
-Deine Aufgabe ist es, aus einem Predigt-Transkript die stärksten, viralsten Momente zu extrahieren.
+Deine Aufgabe ist es, aus einem Predigt-Abschnitt die stärksten, viralsten Momente zu extrahieren.
 
 WICHTIGE REGELN FÜR DIE AUSWAHL:
 1. Wähle Momente, die inspirierend, provokant, tiefgründig oder humorvoll sind.
 2. Ein Clip sollte eine in sich geschlossene, vollständige Aussage bilden.
 3. Die optimale Länge eines Clips liegt zwischen 30 und 60 Sekunden.
-4. Vermeide Clips, die mitten im Satz beginnen oder enden.
+4. SOCIAL MEDIA CLEANUP: Entferne am Satzanfang Füllwörter wie "Und", "Aber", "Denn", "Also" im Feld "hook". Der Einstieg muss sofort zünden.
 5. Nutze EXAKT die Zeitstempel, die im Text stehen. Erfinde keine Zeitstempel.
 
 AUSGABE-FORMAT:
 Du musst STRICT JSON ONLY zurückgeben. 
 - KEIN Markdown.
-- KEINE Code-Blöcke (wie ```json).
-- KEINE Erklärungen oder Einleitungen.
+- KEINE Code-Blöcke.
+- KEINE Erklärungen.
 
 Das JSON muss exakt dieses Schema erfüllen:
 {
@@ -35,14 +35,14 @@ Das JSON muss exakt dieses Schema erfüllen:
       "title": "Kurzer, packender Titel",
       "start": 123.45,
       "end": 171.20,
-      "reason": "Kurze Begründung, warum der Clip stark ist",
-      "hook": "Der erste Satz, der die Aufmerksamkeit fängt",
+      "reason": "Warum dieser Clip stark ist",
+      "hook": "Bereinigter erster Satz (ohne Füllwörter)",
       "confidence": 0.95
     }
   ]
 }
 
-Gib 3 bis 8 Highlights zurück. "start" und "end" müssen Floats (Sekunden) sein.
+Gib so viele Highlights wie möglich (bis zu 10) aus diesem Abschnitt zurück.
 """
 
 JSON_HIGHLIGHT_USER_PROMPT = """Hier ist das Video-Transkript mit Zeitstempeln in Sekunden:
@@ -50,6 +50,30 @@ JSON_HIGHLIGHT_USER_PROMPT = """Hier ist das Video-Transkript mit Zeitstempeln i
 {transcript}
 
 Extrahiere die besten Highlights und antworte AUSSCHLIESSLICH mit dem geforderten JSON.
+"""
+
+JSON_HIGHLIGHT_REDUCE_SYSTEM_PROMPT = """Du bist ein erfahrener Social Media Kurator für Instagram Reels und TikTok. 
+Deine Aufgabe ist es, aus einer Liste von Highlight-Kandidaten die absolut stärksten und viralsten Momente auszuwählen.
+
+WICHTIGE KRITERIEN:
+1. SOCIAL MEDIA PERFORMANCE: Wähle Momente mit einem starken "Hook", die sofort Aufmerksamkeit erregen.
+2. RELEVANZ: Die Clips müssen die Kernaussagen der Zusammenfassung widerspiegeln.
+3. DYNAMIK: Bevorzuge emotionale, humorvolle oder rhetorisch starke Aussagen.
+4. VIELFALT: Achte auf eine gute Mischung (nicht 3 Clips zum selben Unterpunkt).
+
+AUSGABE-FORMAT:
+Du musst STRICT JSON ONLY zurückgeben (exakt wie zuvor). 
+
+Wähle exakt 5 bis 6 Highlights aus der Liste aus.
+"""
+
+JSON_HIGHLIGHT_REDUCE_USER_PROMPT = """Hier ist die Zusammenfassung des Inhalts:
+{summary}
+
+Hier sind die Highlight-Kandidaten:
+{candidates}
+
+Wähle die besten 5-6 Highlights aus, die perfekt für Social Media geeignet sind und die Essenz der Zusammenfassung treffen. Antworte NUR mit dem JSON.
 """
 
 # Diese werden weiterhin für Textzusammenfassungen genutzt

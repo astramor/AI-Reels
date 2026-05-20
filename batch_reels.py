@@ -8,7 +8,9 @@ from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
 import srt
 from core.time_utils import hms_to_seconds, parse_time_to_seconds, seconds_to_hms
+from core.config import settings
 from domains.highlights.parser import HighlightParser
+from domains.video.renderer import gpu_semaphore
 from core.commands import run_command, ProcessRegistry
 
 # --- Logging Configuration ---
@@ -614,10 +616,20 @@ def execute_render_orchestration(vid, stem, summ_dir, json_file, predigt_srt, sp
         item["final_srt_arg"] = final_srt_arg
         item["final_json_arg"] = final_json_arg
 
-    logger.info(f"🚀 Starte paralleles Rendering mit max_workers=3...")
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        for item in render_queue:
-            executor.submit(render_clip, item, vid, reels_out, summ_dir, stem, args)
+    logger.info(f"🚀 Starte paralleles Rendering (Max Parallel: {settings.max_parallel_renders})...")
+    
+    # Da render_clip hier Subprozesse startet, nutzen wir den globalen gpu_semaphore
+    def render_with_semaphore(item, vid, reels_out, summ_dir, stem, args):
+        with gpu_semaphore:
+            render_clip(item, vid, reels_out, summ_dir, stem, args)
+
+    with ThreadPoolExecutor(max_workers=settings.max_parallel_renders) as executor:
+        futures = [
+            executor.submit(render_with_semaphore, item, vid, reels_out, summ_dir, stem, args)
+            for item in render_queue
+        ]
+        for future in futures:
+            future.result() # Warten auf Abschluss und Fehler abfangen
 
 
 def main():

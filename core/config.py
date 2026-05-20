@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # --- WhisperX / Transcription ---
     whisper_model: str = Field(default="large-v2", env="WHISPER_MODEL")
-    whisper_language: Optional[str] = Field(default=None, env="WHISPER_LANGUAGE")
+    whisper_language: Optional[str] = Field(default="de", env="WHISPER_LANGUAGE")
     
     # --- CUDA / Device ---
     whisper_device: str = Field(default_factory=get_default_device, env="WHISPER_DEVICE")
@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     whisper_batch_size: int = Field(default=16, env="WHISPER_BATCH_SIZE")
     whisper_threads: int = Field(default=4, env="WHISPER_THREADS")
     whisper_chunk_size: int = Field(default=30, env="WHISPER_CHUNK_SIZE")
+    max_parallel_renders: int = Field(default=2, env="MAX_PARALLEL_RENDERS", gt=0)
     
     # --- Alignment ---
     align_model: Optional[str] = Field(default=None, env="ALIGN_MODEL")

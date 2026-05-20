@@ -101,6 +101,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Aktiviert detailliertes Logging (DEBUG level)."
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Erzwingt die Neu-Generierung aller Artefakte (Transkription, Highlights), auch wenn sie bereits existieren."
+    )
 
     try:
         args = parser.parse_args(argv)

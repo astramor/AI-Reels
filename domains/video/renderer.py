@@ -2,14 +2,146 @@
 
 import shlex
 import subprocess
+import threading
+import time
+from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 from loguru import logger
 
 # Import der zentralen Settings
 from core.config import settings
 from core.time_utils import seconds_to_hms_ms
 from core.commands import run_command
+
+
+class RenderError(Exception):
+    """Basis-Exception für Rendering-Fehler."""
+    pass
+
+
+class FFmpegError(RenderError):
+    """Spezifischer Fehler bei der Ausführung von FFmpeg."""
+    pass
+
+
+@dataclass
+class RenderJob:
+    """Hält alle Informationen für einen einzelnen Render-Job."""
+    input_video: Path
+    start_ts: float
+    duration: float
+    out_file: Path
+    job_id: str = "unknown"
+    kwargs: Dict[str, Any] = field(default_factory=dict)
+    retries: int = 0
+    max_retries: int = 2
+
+
+# Globaler Semaphore zur Steuerung der GPU-Last
+gpu_semaphore = threading.Semaphore(settings.max_parallel_renders)
+active_renders = 0
+render_lock = threading.Lock()
+
+
+def render_clip(job: RenderJob) -> Path:
+    """
+    Rendert einen einzelnen Clip. Kapselt Command-Build, Ausführung und Validierung.
+    Nutzt den globalen Semaphore zur Parallelitätsbegrenzung.
+    """
+    global active_renders
+    renderer = FFmpegRenderer()
+    
+    with gpu_semaphore:
+        with render_lock:
+            active_renders += 1
+            logger.debug(f"GPU Job gestartet. Aktive Jobs: {active_renders}/{settings.max_parallel_renders}")
+        
+        start_time = time.time()
+        logger.info(f"🚀 [Job {job.job_id}] Starte Rendering: {job.out_file.name}")
+        
+        try:
+            cmd = renderer.build_ffmpeg_cmd(
+                input_video=job.input_video,
+                start_ts=job.start_ts,
+                duration=job.duration,
+                out_file=job.out_file,
+                **job.kwargs
+            )
+            
+            renderer.run_ffmpeg(cmd)
+            
+            # Validierung: Existiert die Datei und ist sie nicht leer?
+            if not job.out_file.exists():
+                raise FFmpegError(f"Output-Datei wurde nicht erstellt: {job.out_file}")
+            if job.out_file.stat().st_size == 0:
+                raise FFmpegError(f"Output-Datei ist leer: {job.out_file}")
+                
+            duration = time.time() - start_time
+            logger.success(f"✅ [Job {job.job_id}] Fertig in {duration:.2f}s: {job.out_file.name}")
+            return job.out_file
+            
+        except Exception as e:
+            logger.error(f"❌ [Job {job.job_id}] Rendering fehlgeschlagen: {e}")
+            raise FFmpegError(str(e)) from e
+        finally:
+            with render_lock:
+                active_renders -= 1
+                logger.debug(f"GPU Job beendet. Verbleibende Jobs: {active_renders}")
+
+
+def render_with_retry(job: RenderJob) -> Path:
+    """Führt einen Render-Job mit optionalen Retries aus."""
+    attempts = 0
+    max_attempts = job.max_retries + 1
+    
+    while attempts < max_attempts:
+        try:
+            return render_clip(job)
+        except FFmpegError as e:
+            attempts += 1
+            if attempts < max_attempts:
+                wait_sec = 2 ** attempts # Exponential backoff
+                logger.warning(f"⚠️ [Job {job.job_id}] Fehler beim {attempts}. Versuch. Retry in {wait_sec}s... ({e})")
+                time.sleep(wait_sec)
+            else:
+                logger.error(f"💀 [Job {job.job_id}] Alle Versuche fehlgeschlagen.")
+                raise
+
+
+def run_batch_render(jobs: List[RenderJob], max_parallel: Optional[int] = None) -> List[Path]:
+    """
+    Orchestriert das parallele Rendering einer Liste von Jobs.
+    """
+    if not jobs:
+        logger.warning("Keine Render-Jobs übergeben.")
+        return []
+
+    parallel = max_parallel or settings.max_parallel_renders
+    # Update global semaphore if needed (though usually it should match settings)
+    global gpu_semaphore
+    if parallel != settings.max_parallel_renders:
+        gpu_semaphore = threading.Semaphore(parallel)
+    
+    logger.info(f"📂 Starte Batch-Rendering für {len(jobs)} Clips (Parallelität: {parallel})")
+    
+    results = []
+    with ThreadPoolExecutor(max_workers=parallel) as executor:
+        future_to_job = {executor.submit(render_with_retry, job): job for job in jobs}
+        
+        for future in as_completed(future_to_job):
+            job = future_to_job[future]
+            try:
+                path = future.result()
+                results.append(path)
+            except Exception as e:
+                logger.error(f"❌ Batch-Job {job.job_id} endgültig fehlgeschlagen: {e}")
+                # Wir sammeln die Fehler hier nicht, sondern lassen die Pipeline ggf. weiterlaufen
+                # außer es wird anders gewünscht.
+    
+    logger.info(f"🏁 Batch-Rendering abgeschlossen. {len(results)}/{len(jobs)} erfolgreich.")
+    return results
 
 
 class FFmpegRenderer:

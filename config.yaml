@@ -9,7 +9,7 @@ manifest: "sermon_windows.yaml"
 whisper: true
 whisper_device: "cuda"
 no_cudnn: true
-
+whisper_language: "de"
 # --- Summarizer (Inhalt) ---
 summarizer_script: "srt_summarizer_local.py"
 summarizer_mode: "fast"
