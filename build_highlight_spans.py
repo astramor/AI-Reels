@@ -792,6 +792,10 @@ def main():
         start_s = item["sec"]
         description = item["text"]
 
+        # A.0 ACOUSTIC START SNAP (only when WhisperX words are available)
+        if words:
+            start_s = processor.snap_start_to_sentence_begin(words, start_s)
+
         # A. SMART CUT
         end_s = start_s + 20
         if llm and not llm.is_gemini:
