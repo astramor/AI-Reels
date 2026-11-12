@@ -9,6 +9,7 @@ from typing import List, Tuple, Generator, Optional
 
 import srt
 from loguru import logger
+from pydantic import ValidationError
 from core.prompts import (
     JSON_HIGHLIGHT_SYSTEM_PROMPT,
     JSON_HIGHLIGHT_USER_PROMPT,
@@ -42,6 +43,10 @@ def _parse_sermon_boundary(value: str, label: str) -> float:
     if not math.isfinite(parsed) or parsed < 0:
         raise ValueError(f"Ungültige {label}: {value!r}")
     return parsed
+
+
+def _overlaps(a: HighlightItem, b: HighlightItem) -> bool:
+    return a.start < b.end and b.start < a.end
 
 
 class SermonSummarizer:
@@ -126,7 +131,7 @@ class SermonSummarizer:
     def validate_highlight_payload(self, payload: dict) -> HighlightPayload:
         try:
             return HighlightPayload.model_validate(payload)
-        except Exception as e:
+        except ValidationError as e:
             raise HighlightValidationError(f"JSON erfüllt nicht das Pydantic Schema: {e}")
 
     def process(
@@ -138,6 +143,13 @@ class SermonSummarizer:
         sermon_end: Optional[str] = None,
         export_sermon_srt: Optional[str] = None,
     ):
+        if (
+            not isinstance(max_highlights, int)
+            or isinstance(max_highlights, bool)
+            or max_highlights <= 0
+        ):
+            raise ValueError("max_highlights muss eine positive Ganzzahl sein")
+
         srt_path = pathlib.Path(srt_path_str)
         out_dir = pathlib.Path(out_dir_str)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -272,8 +284,11 @@ class SermonSummarizer:
             validated_payload = self.validate_highlight_payload(parsed_json)
 
             # Falls zu wenige Ergebnisse, füllen wir validierte Kandidaten auf.
-            target_highlights = min(max_highlights, 6)
-            if len(validated_payload.highlights) < 4 and longlist_candidates:
+            target_highlights = max_highlights
+            if (
+                len(validated_payload.highlights) < target_highlights
+                and longlist_candidates
+            ):
                 logger.warning(
                     "Zu wenige Highlights kuratiert. Fülle aus Kandidaten-Pool auf..."
                 )
@@ -283,16 +298,40 @@ class SermonSummarizer:
                         break
                     try:
                         candidate_model = HighlightItem.model_validate(cand)
-                    except Exception as e:
+                    except ValidationError as e:
                         logger.warning(f"Kandidat konnte nicht validiert werden: {e}")
                         continue
-                    if candidate_model.start not in existing_starts:
-                        validated_payload.highlights.append(candidate_model)
-                        existing_starts.append(candidate_model.start)
+                    if candidate_model.start in existing_starts:
+                        continue
+                    if candidate_model.finalized:
+                        conflict = next(
+                            (
+                                h
+                                for h in validated_payload.highlights
+                                if h.finalized and _overlaps(candidate_model, h)
+                            ),
+                            None,
+                        )
+                        if conflict:
+                            logger.warning(
+                                f"Fallback-Kandidat '{candidate_model.title}' "
+                                f"überschneidet finalisierten Span '{conflict.title}'; "
+                                "übersprungen."
+                            )
+                            continue
+                    validated_payload.highlights.append(candidate_model)
+                    existing_starts.append(candidate_model.start)
 
-                validated_payload = HighlightPayload.model_validate(
-                    validated_payload.model_dump()
-                )
+                try:
+                    validated_payload = HighlightPayload.model_validate(
+                        validated_payload.model_dump()
+                    )
+                except ValidationError as e:
+                    raise HighlightValidationError(
+                        f"Fallback-Merge erfüllt nicht das Pydantic Schema: {e}"
+                    )
+
+            validated_payload.highlights = validated_payload.highlights[:max_highlights]
 
             final_json_path = out_dir / "highlights.json"
             final_json_path.write_text(

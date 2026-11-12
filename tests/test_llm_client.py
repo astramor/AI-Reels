@@ -81,7 +81,7 @@ def test_empty_yaml_gemini_key_uses_env(monkeypatch):
     assert llm.gemini_key == "testenv"
 
 
-def test_non_empty_yaml_key_wins_over_env(monkeypatch):
+def test_env_key_wins_over_non_empty_yaml(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "env-key")
     llm = UnifiedLLM(
         {
@@ -89,4 +89,27 @@ def test_non_empty_yaml_key_wins_over_env(monkeypatch):
             "openai_api_key": "yaml-key",
         }
     )
+    assert llm.openai_key == "env-key"
+
+
+def test_non_empty_yaml_key_is_used_when_env_absent(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    llm = UnifiedLLM(
+        {
+            "llm_provider": "openai",
+            "openai_api_key": "yaml-key",
+        }
+    )
     assert llm.openai_key == "yaml-key"
+
+
+def test_explicit_config_key_wins_over_env(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+    llm = UnifiedLLM(
+        {
+            "llm_provider": "openai",
+            "openai_api_key": "cli-key",
+            "openai_api_key_explicit": True,
+        }
+    )
+    assert llm.openai_key == "cli-key"

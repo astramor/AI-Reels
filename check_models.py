@@ -3,33 +3,30 @@
 """
 check_models.py
 ---------------
-Listet verfügbare Gemini-Modelle. Der API-Key wird primär aus der
-Umgebungsvariable GEMINI_API_KEY gelesen; config.yaml dient nur als Fallback.
+Listet verfügbare Gemini-Modelle. Der API-Key wird über die zentrale
+Settings-Ladung gelesen: GEMINI_API_KEY hat Vorrang; nicht-leere
+config.yaml-Werte dienen als Fallback, leere/null Werte werden ignoriert.
 """
 
 import os
 import sys
 from typing import Optional, Tuple
 
-import yaml
 from google import genai
+
+from core.config import Settings, load_yaml_defaults
 
 
 def load_gemini_key() -> Tuple[str, Optional[str]]:
-    """Read GEMINI_API_KEY first, then fall back to config.yaml."""
-    env_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if env_key:
-        return env_key, "GEMINI_API_KEY"
-
-    try:
-        with open("config.yaml", "r", encoding="utf-8") as f:
-            conf = yaml.safe_load(f) or {}
-        key = str(conf.get("gemini_api_key", "") or "").strip()
-        if key:
+    """Read the Gemini key through the same Settings path as production."""
+    defaults = load_yaml_defaults()
+    settings = Settings(**defaults)
+    key = settings.gemini_api_key.get_secret_value() if settings.gemini_api_key else ""
+    key = key.strip()
+    if key:
+        if "gemini_api_key" in defaults:
             return key, "config.yaml:gemini_api_key"
-    except Exception as exc:
-        print(f"Warnung: config.yaml konnte nicht gelesen werden: {exc}", file=sys.stderr)
-
+        return key, "GEMINI_API_KEY"
     return "", None
 
 

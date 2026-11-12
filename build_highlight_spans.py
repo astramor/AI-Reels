@@ -19,7 +19,16 @@ from domains.transcription.processor import SubtitleProcessor
 
 # ====================== CONFIG ======================
 
-DEFAULT_MODEL = "qwen2.5:14b-instruct-q6_K"
+def apply_cli_model_overrides(config, args):
+    """Apply only explicitly supplied CLI model/key overrides."""
+    if args.gemini_api_key:
+        config["gemini_api_key"] = args.gemini_api_key
+        config["gemini_api_key_explicit"] = True
+    if args.llm_model:
+        config["llm_model"] = args.llm_model
+    if args.gemini_model:
+        config["gemini_model"] = args.gemini_model
+    return config
 
 # ====================== 1. OLLAMA PROMPTS (Streng & Strukturiert) ======================
 
@@ -269,13 +278,13 @@ def parse_longlist(path):
     text = path.read_text(encoding="utf-8")
     entries = []
     pattern = re.compile(
-        r"\[(\d+):(\d+):(\d+)\]\s*(?:\*\*(.*?)\*\*:?)?\s*\"?(.*?)\"?\s*$", re.MULTILINE
+        r"\[(\d+):(\d+):(\d+(?:\.\d+)?)\]\s*(?:\*\*(.*?)\*\*:?)?\s*\"?(.*?)\"?\s*$",
+        re.MULTILINE,
     )
     for line in text.splitlines():
         m = pattern.search(line)
         if m:
-            h, mn, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            sec = h * 3600 + mn * 60 + s
+            sec = hms_to_seconds(m.group(1), m.group(2), m.group(3))
             desc = m.group(5).strip()
             category = m.group(4)
             if category and len(desc.split()) < 3:
@@ -341,7 +350,7 @@ def score_candidates_with_llm(entries, total_duration, llm):
     for i, entry in enumerate(entries, 1):
         clips.append({
             "id": i,
-            "start": seconds_to_hms(entry["sec"]),
+            "start": seconds_to_hms_ms(entry["sec"]),
             "position": _position_label(entry["sec"], total_duration),
             "text": entry["text"],
         })
@@ -653,9 +662,9 @@ def main():
     ap.add_argument("--llm-titles", action="store_true")
     ap.add_argument("--no-llm", action="store_true")
 
-    ap.add_argument("--llm-model", default=DEFAULT_MODEL)
-    ap.add_argument("--gemini-api-key", default="")
-    ap.add_argument("--gemini-model", default="gemini-1.5-flash")
+    ap.add_argument("--llm-model", default=None)
+    ap.add_argument("--gemini-api-key", default=None)
+    ap.add_argument("--gemini-model", default=None)
 
     ap.add_argument("--title-min")
     ap.add_argument("--title-max")
@@ -674,15 +683,8 @@ def main():
             or {}
         )
 
-    # 2. Argumente als Fallback/Override zulassen
-    if args.gemini_api_key:
-        config["gemini_api_key"] = args.gemini_api_key
-    if args.llm_model:
-        config["llm_model"] = args.llm_model
-
-    # DIESE ZEILE FEHLT BEI DIR:
-    if args.gemini_model:
-        config["gemini_model"] = args.gemini_model
+    # 2. Nur explizit gesetzte Argumente als Override zulassen
+    config = apply_cli_model_overrides(config, args)
 
     if "llm_provider" not in config:
         config["llm_provider"] = "ollama"

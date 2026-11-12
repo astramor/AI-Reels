@@ -47,13 +47,21 @@ def clean_json_text(text: str) -> str:
 
 
 def _get_config_value(config: Dict[str, Any], key: str, env_name: str) -> str:
+    # Explicit CLI overrides are marked in the config and take precedence.
+    if config.get(f"{key}_explicit"):
+        value = config.get(key)
+        if value:
+            return value
+
+    env_value = os.getenv(env_name, "").strip()
+    if env_value:
+        return env_value
+
     value = config.get(key)
     if not value and key in ("openrouter_api_key", "openai_api_key"):
         nested = config.get("openrouter")
         if isinstance(nested, dict):
             value = nested.get("api_key")
-    if not value:
-        value = os.getenv(env_name, "")
     return value or ""
 
 

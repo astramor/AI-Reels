@@ -40,7 +40,7 @@ from core.prompts import (
     GEMINI_PROMPT_CHUNK,
     GEMINI_PROMPT_MERGE,
 )
-from core.time_utils import parse_time_to_seconds, seconds_to_hms
+from core.time_utils import parse_time_to_seconds, seconds_to_hms_ms
 from domains.transcription.processor import filter_sermon_items
 
 
@@ -64,21 +64,109 @@ def srt_items(path):
 
 def build_highlight_candidates(sermon_items):
     return [
-        f"[{seconds_to_hms(it.start.total_seconds())}] {txt[:200]}"
+        {
+            "start": float(it.start.total_seconds()),
+            "text": txt[:200],
+        }
         for it, txt in sermon_items
         if len(txt.split()) > 5
     ]
 
 
+def _normalize_text(text):
+    return re.sub(r"\s+", " ", str(text)).strip().strip('"').lower()
+
+
+def _text_match_kind(candidate_text, output_text):
+    candidate = _normalize_text(candidate_text)
+    output = _normalize_text(output_text)
+    if not candidate or not output:
+        return None
+    if candidate == output:
+        return "exact"
+    if output in candidate or candidate in output:
+        return "substring"
+    return None
+
+
+def _select_candidate(candidates, txt, context):
+    """Select one candidate only when the text match is unambiguous."""
+    if len(candidates) == 1:
+        return candidates[0]
+
+    exact_matches = [
+        r for r in candidates if _text_match_kind(r["text"], txt) == "exact"
+    ]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(exact_matches) > 1:
+        logger.warning(
+            f"{context}: mehrdeutiger exakter Texttreffer; Referenz übersprungen."
+        )
+        return None
+
+    substring_matches = [
+        r for r in candidates if _text_match_kind(r["text"], txt) == "substring"
+    ]
+    if len(substring_matches) == 1:
+        return substring_matches[0]
+    if len(substring_matches) > 1:
+        logger.warning(
+            f"{context}: mehrdeutiger Teiltext-Treffer; Referenz übersprungen."
+        )
+        return None
+
+    logger.warning(f"{context}: kein eindeutiger Texttreffer; Referenz übersprungen.")
+    return None
+
+
+def _find_candidate(sec, txt, records, tol, legacy_whole_second):
+    """Map an LLM timestamp back to the original fractional subtitle start.
+
+    Fractional LLM timestamps must match exactly. Legacy whole-second output
+    uses the same-second/nearest compatibility window, but only unambiguous
+    text matches are accepted when more than one candidate is eligible.
+    """
+    exact = [r for r in records if abs(r["start"] - sec) < 1e-6]
+    if exact:
+        return _select_candidate(exact, txt, "exakte Zeitstempel-Referenz")
+
+    if not legacy_whole_second:
+        logger.warning(
+            f"Exakte Zeitstempel-Referenz {sec:.3f}: kein exakter Kandidat."
+        )
+        return None
+
+    sec_int = int(round(sec))
+    same_second = [
+        r
+        for r in records
+        if int(round(r["start"])) == sec_int or int(r["start"]) == sec_int
+    ]
+    if same_second:
+        return _select_candidate(
+            same_second, txt, "legacy whole-second same-second"
+        )
+
+    near = [r for r in records if abs(r["start"] - sec) <= tol]
+    if near:
+        return _select_candidate(near, txt, "legacy whole-second near")
+
+    logger.warning(
+        f"Legacy-Zeitstempel {sec:.3f}: kein passender Kandidat."
+    )
+    return None
+
+
 def sanitize_highlights(text, items, tol=8):
+    records = [
+        {"start": float(it.start.total_seconds()), "text": txt}
+        for it, txt in items
+    ]
     out = []
-    sec_map = {
-        int(round(it.start.total_seconds())): seconds_to_hms(it.start.total_seconds())
-        for it, _txt in items
-    }
-    used = set()
+    used_starts = []
     line_re = re.compile(
-        r"\[(\d{1,2})[:.](\d{1,2})(?:[:.](\d{1,2}))?\]\s*(.*)"
+        r"\[(\d{1,2})[:.](\d{1,2})(?:[:.](\d{1,2}(?:\.\d+)?))?\]\s*(.*)"
     )
 
     for line in text.splitlines():
@@ -91,27 +179,45 @@ def sanitize_highlights(text, items, tol=8):
 
         h = int(m.group(1))
         minute = int(m.group(2))
-        second = int(m.group(3) or 0)
+        second_text = m.group(3) or "0"
+        second = float(second_text)
         txt = m.group(4).strip()
         sec = h * 3600 + minute * 60 + second
+        legacy_whole_second = "." not in second_text
 
-        if any(s in used for s in range(sec - 15, sec + 15)):
+        candidate = _find_candidate(
+            sec, txt, records, tol, legacy_whole_second
+        )
+        if not candidate:
             continue
 
-        found = None
-        for off in range(-tol, tol + 1):
-            if (sec + off) in sec_map:
-                found = sec_map[sec + off]
-                break
+        start = candidate["start"]
+        if any(abs(start - used) < 15.0 for used in used_starts):
+            continue
 
-        if found:
-            clean = re.sub(
-                r"^(Und|Aber|Denn)\s+", "", txt, flags=re.IGNORECASE
-            ).strip('"').strip()
-            if len(clean) > 8:
-                out.append(f"- [{found}] {clean}")
-                used.add(sec)
+        clean = re.sub(
+            r"^(Und|Aber|Denn)\s+", "", txt, flags=re.IGNORECASE
+        ).strip('"').strip()
+        if len(clean) > 8:
+            out.append({"start": start, "text": clean})
+            used_starts.append(start)
+        else:
+            logger.warning(
+                f"Zeitstempel-Referenz {sec:.3f}: Text zu kurz/unsicher; übersprungen."
+            )
 
+    return out
+
+
+def _dedupe_highlights(highlights):
+    seen = set()
+    out = []
+    for highlight in highlights:
+        key = (round(float(highlight["start"]), 6), highlight["text"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(highlight)
     return out
 
 
@@ -136,6 +242,13 @@ def _map_model_to_provider_field(conf, provider, model):
 
 
 def run(args):
+    if (
+        not isinstance(args.max_highlights, int)
+        or isinstance(args.max_highlights, bool)
+        or args.max_highlights <= 0
+    ):
+        raise ValueError("max_highlights muss eine positive Ganzzahl sein")
+
     conf = {}
     if pathlib.Path("config.yaml").exists():
         conf = yaml.safe_load(
@@ -200,7 +313,7 @@ def run(args):
 
     transcript = "\n".join(
         [
-            f"[{seconds_to_hms(it.start.total_seconds())}] {txt}"
+            f"[{seconds_to_hms_ms(it.start.total_seconds())}] {txt}"
             for it, txt in items
         ]
     )
@@ -235,11 +348,14 @@ def run(args):
     # 6. Highlights scouting
     logger.info("--- Highlights Scouting ---")
     candidates = build_highlight_candidates(items)
+    candidate_lines = [
+        f"[{seconds_to_hms_ms(c['start'])}] {c['text']}" for c in candidates
+    ]
     hl_chunks = []
     current_lines = []
     current_len = 0
 
-    for candidate in candidates:
+    for candidate in candidate_lines:
         if current_len + len(candidate) > c_size:
             hl_chunks.append("\n".join(current_lines))
             current_lines = []
@@ -272,42 +388,37 @@ def run(args):
     )
     final_clean = sanitize_highlights(final_raw, items, args.strict_snap_tol)
 
-    if len(final_clean) < 6:
+    if len(final_clean) < args.max_highlights:
         logger.warning("Auffüllen aus Longlist...")
         more = sanitize_highlights(
             "\n".join(longlist), items, args.strict_snap_tol
         )
         for entry in more:
-            if len(final_clean) >= 6:
+            if len(final_clean) >= args.max_highlights:
                 break
             if entry not in final_clean:
                 final_clean.append(entry)
 
     if not final_clean and candidates:
         logger.warning("Keine kuratierten Highlights; nutze Kandidaten-Fallback.")
-        final_clean = [
-            f"- {candidate}" for candidate in candidates[: args.max_highlights]
-        ]
+        final_clean = candidates[: args.max_highlights]
+
+    final_clean = _dedupe_highlights(final_clean)
+    final_clean = final_clean[: args.max_highlights]
 
     (out_dir / "highlights.md").write_text(
-        "\n".join(final_clean), encoding="utf-8"
+        "\n".join(
+            f"- [{seconds_to_hms_ms(h['start'])}] {h['text']}"
+            for h in final_clean
+        ),
+        encoding="utf-8",
     )
 
     # 8. Write strict JSON for build_highlight_spans.py / batch_reels.py.
     payload = []
-    for line in final_clean:
-        m = re.search(
-            r"\[(\d{1,2}):(\d{2}):(\d{2})\]\s*(.*)", line
-        )
-        if not m:
-            continue
-
-        start = float(
-            int(m.group(1)) * 3600
-            + int(m.group(2)) * 60
-            + int(m.group(3))
-        )
-        text = m.group(4).strip()
+    for highlight in final_clean:
+        start = float(highlight["start"])
+        text = highlight["text"]
 
         end = min(start + 30.0, t1)
         if end <= start:
@@ -338,7 +449,7 @@ def main():
     ap.add_argument("--out_dir", default="out_summ")
     ap.add_argument("--max-highlights", type=int, default=8)
     ap.add_argument("--model", default=None)
-    ap.add_argument("--llm-provider", default="")
+    ap.add_argument("--llm-provider", default=None)
     ap.add_argument("--export-sermon-srt")
     ap.add_argument("--sermon-start")
     ap.add_argument("--sermon-end")

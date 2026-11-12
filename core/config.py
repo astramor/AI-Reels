@@ -2,6 +2,7 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 from typing import Optional
+import os
 import shutil
 import yaml
 
@@ -32,9 +33,14 @@ def load_yaml_defaults() -> dict:
     if not isinstance(data, dict):
         return {}
     mapped = {SETTINGS_ALIASES.get(key, key): value for key, value in data.items()}
-    # Empty API-key values in YAML must not override the real env vars.
-    for key in ("openai_api_key", "gemini_api_key"):
-        if mapped.get(key) == "":
+    # API keys are environment-first: empty/null YAML values and YAML values
+    # that would shadow a set environment variable are omitted from Settings.
+    api_key_env = {
+        "openai_api_key": "OPENAI_API_KEY",
+        "gemini_api_key": "GEMINI_API_KEY",
+    }
+    for key, env_name in api_key_env.items():
+        if mapped.get(key) in ("", None) or os.getenv(env_name, "").strip():
             mapped.pop(key, None)
     return mapped
 

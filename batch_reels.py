@@ -416,10 +416,10 @@ def setup_argparse(defaults):
     ap.add_argument("--llm-titles", action="store_true")
     ap.add_argument("--church-yaml", default="besuchen.md")
 
-    ap.add_argument("--llm-model", default="")
-    ap.add_argument("--llm-provider", default="")
-    ap.add_argument("--gemini-api-key", default="")
-    ap.add_argument("--gemini-model", default="")
+    ap.add_argument("--llm-model", default=None)
+    ap.add_argument("--llm-provider", default=None)
+    ap.add_argument("--gemini-api-key", default=None)
+    ap.add_argument("--gemini-model", default=None)
 
     ap.add_argument("--render", action="store_true")
     ap.add_argument("--confirm-spans", action="store_true")
@@ -516,6 +516,13 @@ def execute_transcription(vid, stem, out_whisper_dir, args):
 
 
 def execute_summarizer(srt_file, summ_dir, predigt_srt, defaults, args):
+    if (
+        not isinstance(args.max_highlights, int)
+        or isinstance(args.max_highlights, bool)
+        or args.max_highlights <= 0
+    ):
+        raise ValueError("--max-highlights muss eine positive Ganzzahl sein")
+
     logger.info("Starte Summarizer...")
     s_cmd = [
         sys.executable,
@@ -549,8 +556,7 @@ def execute_summarizer(srt_file, summ_dir, predigt_srt, defaults, args):
     if args.sermon_end:
         s_cmd += ["--sermon-end", args.sermon_end]
 
-    if args.max_highlights:
-        s_cmd += ["--max-highlights", str(args.max_highlights)]
+    s_cmd += ["--max-highlights", str(args.max_highlights)]
     if args.strict_snap_tol:
         s_cmd += ["--strict-snap-tol", str(args.strict_snap_tol)]
 
@@ -582,9 +588,9 @@ def execute_span_builder(hl_md, predigt_srt, spans_md, spans_json, args, transcr
         str(args.title_min),
         "--title-max",
         str(args.title_max),
-        "--gemini-model",
-        args.gemini_model,
     ]
+    if args.gemini_model:
+        b_cmd += ["--gemini-model", args.gemini_model]
     if transcription_json and Path(transcription_json).exists():
         b_cmd += ["--transcription-json", str(transcription_json)]
     if args.llm_titles:
