@@ -419,6 +419,7 @@ def setup_argparse(defaults):
     ap.add_argument("--llm-model", default=None)
     ap.add_argument("--llm-provider", default=None)
     ap.add_argument("--gemini-api-key", default=None)
+    ap.add_argument("--openrouter-api-key", default=None)
     ap.add_argument("--gemini-model", default=None)
 
     ap.add_argument("--render", action="store_true")
@@ -544,6 +545,10 @@ def execute_summarizer(srt_file, summ_dir, predigt_srt, defaults, args):
         ]
     if args.llm_provider:
         s_cmd += ["--llm-provider", args.llm_provider]
+    if getattr(args, "gemini_api_key", None):
+        s_cmd += ["--gemini-api-key", args.gemini_api_key]
+    if getattr(args, "openrouter_api_key", None):
+        s_cmd += ["--openrouter-api-key", args.openrouter_api_key]
 
     provider = (args.llm_provider or settings.llm_provider).lower()
     if provider in ("gemini", "gemini-api") and args.gemini_model:
@@ -589,8 +594,16 @@ def execute_span_builder(hl_md, predigt_srt, spans_md, spans_json, args, transcr
         "--title-max",
         str(args.title_max),
     ]
-    if args.gemini_model:
+    if getattr(args, "llm_provider", None):
+        b_cmd += ["--llm-provider", args.llm_provider]
+    if getattr(args, "llm_model", None):
+        b_cmd += ["--llm-model", args.llm_model]
+    if getattr(args, "gemini_model", None):
         b_cmd += ["--gemini-model", args.gemini_model]
+    if getattr(args, "gemini_api_key", None):
+        b_cmd += ["--gemini-api-key", args.gemini_api_key]
+    if getattr(args, "openrouter_api_key", None):
+        b_cmd += ["--openrouter-api-key", args.openrouter_api_key]
     if transcription_json and Path(transcription_json).exists():
         b_cmd += ["--transcription-json", str(transcription_json)]
     if args.llm_titles:

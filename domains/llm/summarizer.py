@@ -71,6 +71,9 @@ class SermonSummarizer:
             "gemini_api_key": settings.gemini_api_key.get_secret_value() if settings.gemini_api_key else "",
             "openai_api_key": settings.openai_api_key,
             "openai_base_url": settings.openai_base_url,
+            "openrouter_api_key": settings.openrouter_api_key.get_secret_value() if settings.openrouter_api_key else "",
+            "openrouter_base_url": settings.openrouter_base_url,
+            "openrouter_json_mode": settings.openrouter_json_mode,
         }
         self.llm = UnifiedLLM(config)
         self.provider = self.llm.provider

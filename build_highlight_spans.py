@@ -19,15 +19,55 @@ from domains.transcription.processor import SubtitleProcessor
 
 # ====================== CONFIG ======================
 
+def _set_model_for_provider(config, provider, model):
+    """Write an explicit model into the active provider's field."""
+    provider = str(provider).lower()
+    if provider == "gemini-api":
+        provider = "gemini"
+    if provider == "openrouter":
+        nested = config.get("openrouter")
+        if isinstance(nested, dict):
+            nested["model"] = model
+        else:
+            config["openrouter_model"] = model
+    elif provider == "gemini":
+        config["gemini_model"] = model
+    elif provider == "ollama":
+        config["ollama_model"] = model
+    elif provider == "openai":
+        config["openai_model"] = model
+    elif provider == "llama-server":
+        config["llama_server_model"] = model
+    # Keep the legacy generic field populated for compatibility; provider-specific
+    # fields still win in UnifiedLLM.
+    config["llm_model"] = model
+
+
 def apply_cli_model_overrides(config, args):
-    """Apply only explicitly supplied CLI model/key overrides."""
-    if args.gemini_api_key:
+    """Apply only explicitly supplied CLI provider/model/key overrides."""
+    llm_provider = getattr(args, "llm_provider", None)
+    if llm_provider:
+        config["llm_provider"] = llm_provider
+        config["llm_provider_explicit"] = True
+
+    provider = str(llm_provider or config.get("llm_provider") or "ollama").lower()
+    if provider == "gemini-api":
+        provider = "gemini"
+
+    if getattr(args, "gemini_api_key", None):
         config["gemini_api_key"] = args.gemini_api_key
         config["gemini_api_key_explicit"] = True
-    if args.llm_model:
-        config["llm_model"] = args.llm_model
-    if args.gemini_model:
+    if getattr(args, "openrouter_api_key", None):
+        config["openrouter_api_key"] = args.openrouter_api_key
+        config["openrouter_api_key_explicit"] = True
+    if getattr(args, "llm_model", None):
+        _set_model_for_provider(config, provider, args.llm_model)
+        config["model_explicit"] = True
+    if getattr(args, "gemini_model", None):
         config["gemini_model"] = args.gemini_model
+        config["gemini_model_explicit"] = True
+        if provider == "gemini":
+            config["model_explicit"] = True
     return config
 
 # ====================== 1. OLLAMA PROMPTS (Streng & Strukturiert) ======================
@@ -65,6 +105,11 @@ Deine NEUE Version (3-8 Wörter, mit Punkt oder Ausrufezeichen am Ende):
 OLLAMA_PROMPT_PICK_END = """Finde das Satzende. Länge {min_s}-{max_s}s.
 Transkript: {context}
 Antworte NUR mit Zeitstempel (HH:MM:SS)."""
+
+# Provider-neutral aliases: these prompts are not Ollama-specific.
+PROMPT_TABLOID_TRANSFORM = OLLAMA_PROMPT_TABLOID_TRANSFORM
+PROMPT_RETRY_LAZY = OLLAMA_PROMPT_RETRY_LAZY
+PROMPT_PICK_END = OLLAMA_PROMPT_PICK_END
 
 OLLAMA_PROMPT_CAPTION_MONDAY = """
 Du bist Social Media Manager. Zielgruppe: Menschen, die im Alltag gestresst sind und viel zu tun haben.
@@ -541,13 +586,13 @@ def clean_title_final(text):
 def llm_transform_title(llm, description):
     try:
         # Wir geben Qwen den Text und lassen ihn den besten Titel daraus formen
-        prompt = OLLAMA_PROMPT_TABLOID_TRANSFORM.format(description=description)
+        prompt = PROMPT_TABLOID_TRANSFORM.format(description=description)
         raw = llm.chat("Du bist Redakteur.", prompt, temp=0.7, max_tokens=60)
         title = clean_title_final(raw)
 
         # Nur noch ein Sicherheitsnetz, falls Qwen komplett versagt oder zu viel faselt
         if len(title.split()) < 2 or len(title.split()) > 10:
-            retry_prompt = OLLAMA_PROMPT_RETRY_LAZY.format(description=description)
+            retry_prompt = PROMPT_RETRY_LAZY.format(description=description)
             raw = llm.chat("Du bist Redakteur.", retry_prompt, temp=0.9, max_tokens=60)
             title = clean_title_final(raw)
 
@@ -601,20 +646,20 @@ def llm_generate_posts(llm, title, context, next_sunday_info):
 
     # 1. WEICHE: Den richtigen Prompt anhand des Modells wählen
     prompt_monday = (
-        GEMINI_PROMPT_CAPTION_MONDAY if llm.is_gemini else OLLAMA_PROMPT_CAPTION_MONDAY
+        GEMINI_PROMPT_CAPTION_MONDAY if llm.is_cloud_llm else OLLAMA_PROMPT_CAPTION_MONDAY
     )
     prompt_friday = (
-        GEMINI_PROMPT_CAPTION_FRIDAY if llm.is_gemini else OLLAMA_PROMPT_CAPTION_FRIDAY
+        GEMINI_PROMPT_CAPTION_FRIDAY if llm.is_cloud_llm else OLLAMA_PROMPT_CAPTION_FRIDAY
     )
 
     sys_role_m = (
         "Du bist ein eleganter Copywriter."
-        if llm.is_gemini
+        if llm.is_cloud_llm
         else "Du bist Social Media Manager."
     )
     sys_role_f = (
         "Du bist ein eleganter Copywriter."
-        if llm.is_gemini
+        if llm.is_cloud_llm
         else "Du bist Community Manager."
     )
 
@@ -663,7 +708,9 @@ def main():
     ap.add_argument("--no-llm", action="store_true")
 
     ap.add_argument("--llm-model", default=None)
+    ap.add_argument("--llm-provider", default=None)
     ap.add_argument("--gemini-api-key", default=None)
+    ap.add_argument("--openrouter-api-key", default=None)
     ap.add_argument("--gemini-model", default=None)
 
     ap.add_argument("--title-min")
@@ -695,6 +742,7 @@ def main():
     if use_llm:
         print("\n" + "=" * 40)
         llm = UnifiedLLM(config)
+        print(f"LLM: {llm.provider} / {llm.model}")
         print("=" * 40 + "\n")
     else:
         print("\n⚠️  WARNUNG: LLM Modus ist DEAKTIVIERT. Erstelle Placeholder-Titel.\n")
@@ -804,7 +852,7 @@ def main():
             ctx_timed = collect_context_timed(subs, start_s, args.target_max + 10)
             end_resp = llm.chat(
                 "Cutter",
-                OLLAMA_PROMPT_PICK_END.format(
+                PROMPT_PICK_END.format(
                     min_s=args.target_min, max_s=args.target_max, context=ctx_timed
                 ),
                 temp=0.1,
@@ -855,7 +903,7 @@ def main():
             title = generated_gemini_titles.get(i, clean_title_final(description))
             if not title:
                 title = " ".join(description.split()[:5]) + "."
-        elif llm and not llm.is_gemini:
+        elif llm:
             title = llm_transform_title(llm, description)
         else:
             title = " ".join(description.split()[:5]) + "."

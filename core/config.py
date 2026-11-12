@@ -17,6 +17,9 @@ SETTINGS_ALIASES = {
     "ducking_release": "ffmpeg_ducking_release",
     "openai_base_url": "openai_base_url",
     "openai_api_key": "openai_api_key",
+    "openrouter_base_url": "openrouter_base_url",
+    "openrouter_api_key": "openrouter_api_key",
+    "openrouter_json_mode": "openrouter_json_mode",
 }
 
 
@@ -38,6 +41,7 @@ def load_yaml_defaults() -> dict:
     api_key_env = {
         "openai_api_key": "OPENAI_API_KEY",
         "gemini_api_key": "GEMINI_API_KEY",
+        "openrouter_api_key": "OPENROUTER_API_KEY",
     }
     for key, env_name in api_key_env.items():
         if mapped.get(key) in ("", None) or os.getenv(env_name, "").strip():
@@ -69,6 +73,9 @@ class Settings(BaseSettings):
     # --- OpenAI-compatible providers (OpenRouter, llama-server, etc.) ---
     openai_base_url: str = Field(default="https://openrouter.ai/api/v1", validation_alias="OPENAI_BASE_URL")
     openai_api_key: str = Field(default="", validation_alias="OPENAI_API_KEY")
+    openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1", validation_alias="OPENROUTER_BASE_URL")
+    openrouter_api_key: Optional[SecretStr] = Field(default=None, validation_alias="OPENROUTER_API_KEY")
+    openrouter_json_mode: str = Field(default="unknown", validation_alias="OPENROUTER_JSON_MODE")
 
     # --- WhisperX / Transcription ---
     whisper_model: str = Field(default="large-v2", validation_alias="WHISPER_MODEL")

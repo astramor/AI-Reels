@@ -237,8 +237,8 @@ def _map_model_to_provider_field(conf, provider, model):
         conf["ollama_model"] = model
     elif provider == "llama-server":
         conf["llama_server_model"] = model
-    else:
-        conf["llm_model"] = model
+    # Keep the legacy generic field populated; provider-specific fields still win.
+    conf["llm_model"] = model
 
 
 def run(args):
@@ -258,6 +258,7 @@ def run(args):
     # 1. Provider override must happen BEFORE UnifiedLLM is initialized.
     if args.llm_provider:
         conf["llm_provider"] = args.llm_provider
+        conf["llm_provider_explicit"] = True
 
     provider = str(conf.get("llm_provider", "ollama")).lower()
     if provider == "gemini-api":
@@ -266,8 +267,23 @@ def run(args):
     # 2. Explicit model override mapped to the active provider's field.
     if args.model:
         _map_model_to_provider_field(conf, provider, args.model)
+        conf["model_explicit"] = True
+
+    # 3. Explicit API-key overrides win over environment and YAML.
+    gemini_key = getattr(args, "gemini_api_key", None)
+    if gemini_key:
+        conf["gemini_api_key"] = gemini_key
+        conf["gemini_api_key_explicit"] = True
+    openrouter_key = getattr(args, "openrouter_api_key", None)
+    if openrouter_key:
+        conf["openrouter_api_key"] = openrouter_key
+        conf["openrouter_api_key_explicit"] = True
 
     llm = UnifiedLLM(conf)
+    logger.info(
+        f"LLM: {getattr(llm, 'provider', 'unknown')} / "
+        f"{getattr(llm, 'model', 'unknown')}"
+    )
 
     # 3. Prompt and chunk selection based on cloud/local, not Gemini-only.
     prompt_map = GEMINI_PROMPT_MAP if llm.is_cloud_llm else OLLAMA_PROMPT_MAP
@@ -450,6 +466,8 @@ def main():
     ap.add_argument("--max-highlights", type=int, default=8)
     ap.add_argument("--model", default=None)
     ap.add_argument("--llm-provider", default=None)
+    ap.add_argument("--gemini-api-key", default=None)
+    ap.add_argument("--openrouter-api-key", default=None)
     ap.add_argument("--export-sermon-srt")
     ap.add_argument("--sermon-start")
     ap.add_argument("--sermon-end")

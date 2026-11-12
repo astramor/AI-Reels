@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
 import os
 import re
 import time
@@ -24,7 +25,8 @@ except ImportError:
 
 
 DEFAULT_MODEL = "qwen2.5:14b-instruct-q6_K"
-DEFAULT_GEMINI_MODEL = "gemini-1.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_LLAMA_SERVER_BASE_URL = "http://127.0.0.1:8080/v1"
 
@@ -46,6 +48,15 @@ def clean_json_text(text: str) -> str:
     return text.strip()
 
 
+def _is_unsupported_response_format_error(exc: Exception) -> bool:
+    """Detect a narrow, explicit unsupported-response_format error."""
+    message = str(exc).lower()
+    return "response_format" in message and any(
+        token in message
+        for token in ("unsupported", "not supported", "invalid parameter", "unknown parameter")
+    )
+
+
 def _get_config_value(config: Dict[str, Any], key: str, env_name: str) -> str:
     # Explicit CLI overrides are marked in the config and take precedence.
     if config.get(f"{key}_explicit"):
@@ -58,7 +69,7 @@ def _get_config_value(config: Dict[str, Any], key: str, env_name: str) -> str:
         return env_value
 
     value = config.get(key)
-    if not value and key in ("openrouter_api_key", "openai_api_key"):
+    if not value and key == "openrouter_api_key":
         nested = config.get("openrouter")
         if isinstance(nested, dict):
             value = nested.get("api_key")
@@ -68,35 +79,28 @@ def _get_config_value(config: Dict[str, Any], key: str, env_name: str) -> str:
 def _get_model_for_provider(config: Dict[str, Any], provider: str) -> str:
     """Resolve the model name for the active provider.
 
-    Supports provider-specific fields as well as the legacy ``llm_model``
-    fallback. OpenRouter may also use the nested ``openrouter.model`` form.
+    Provider-specific fields win. ``llm_model`` remains a legacy fallback only
+    for OpenAI/llama-server, so switching to OpenRouter, Gemini, or Ollama does
+    not silently reuse a model configured for another provider.
     """
     provider = provider.lower()
     if provider == "gemini-api":
         provider = "gemini"
 
     if provider == "gemini":
-        return (
-            config.get("gemini_model")
-            or config.get("llm_model")
-            or DEFAULT_GEMINI_MODEL
-        )
+        return config.get("gemini_model") or DEFAULT_GEMINI_MODEL
 
     if provider == "openrouter":
         nested = config.get("openrouter")
         if isinstance(nested, dict) and nested.get("model"):
             return nested["model"]
-        return (
-            config.get("openrouter_model")
-            or config.get("llm_model")
-            or DEFAULT_MODEL
-        )
+        return config.get("openrouter_model") or DEFAULT_OPENROUTER_MODEL
 
     if provider == "openai":
         return config.get("openai_model") or config.get("llm_model") or DEFAULT_MODEL
 
     if provider == "ollama":
-        return config.get("ollama_model") or config.get("llm_model") or DEFAULT_MODEL
+        return config.get("ollama_model") or DEFAULT_MODEL
 
     if provider == "llama-server":
         return (
@@ -111,6 +115,8 @@ def _get_model_for_provider(config: Dict[str, Any], provider: str) -> str:
 class UnifiedLLM:
     def __init__(self, config: Dict[str, Any]):
         self.config = config or {}
+        self.provider_explicit = bool(self.config.get("llm_provider_explicit"))
+        self.model_explicit = bool(self.config.get("model_explicit"))
         raw_provider = str(self.config.get("llm_provider", "ollama")).lower()
         if raw_provider == "gemini-api":
             self.provider = "gemini"
@@ -130,7 +136,7 @@ class UnifiedLLM:
 
         self.is_gemini = self.provider == "gemini"
         self.is_openai = self.provider in ("openai", "openrouter", "llama-server")
-        self.is_openrouter = self.provider in ("openrouter", "openai")
+        self.is_openrouter = self.provider == "openrouter"
 
         self.gemini_key = _get_config_value(
             self.config, "gemini_api_key", "GEMINI_API_KEY"
@@ -145,6 +151,10 @@ class UnifiedLLM:
         self.gemini_model = _get_model_for_provider(self.config, "gemini")
         self.model = _get_model_for_provider(self.config, self.provider)
         self.openrouter_base_url = (
+            self.config.get("openrouter_base_url")
+            or os.getenv("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL)
+        )
+        self.openai_base_url = (
             self.config.get("openai_base_url")
             or os.getenv("OPENAI_BASE_URL", DEFAULT_OPENROUTER_BASE_URL)
         )
@@ -181,9 +191,13 @@ class UnifiedLLM:
         elif provider == "openrouter":
             if not OpenAI:
                 raise ImportError("Bitte `pip install openai` für OpenRouter-Support.")
-            key = self.openrouter_key or self.openai_key
+            key = self.openrouter_key
             if not key:
-                raise ValueError("OPENROUTER_API_KEY oder OPENAI_API_KEY fehlt.")
+                raise ValueError(
+                    "OPENROUTER_API_KEY fehlt (set --openrouter-api-key, "
+                    "OPENROUTER_API_KEY, or openrouter_api_key/openrouter.api_key "
+                    "in config.yaml)."
+                )
             self._clients[provider] = OpenAI(
                 base_url=self.openrouter_base_url,
                 api_key=key,
@@ -192,18 +206,21 @@ class UnifiedLLM:
         elif provider == "openai":
             if not OpenAI:
                 raise ImportError("Bitte `pip install openai` für OpenAI-Support.")
-            key = self.openai_key or self.openrouter_key
+            key = self.openai_key
             if not key:
-                raise ValueError("OPENAI_API_KEY oder OPENROUTER_API_KEY fehlt.")
+                raise ValueError(
+                    "OPENAI_API_KEY fehlt (set OPENAI_API_KEY or openai_api_key "
+                    "in config.yaml)."
+                )
             self._clients[provider] = OpenAI(
-                base_url=self.openrouter_base_url,
+                base_url=self.openai_base_url,
                 api_key=key,
             )
             self._models[provider] = _get_model_for_provider(self.config, provider)
         elif provider == "llama-server":
             if not OpenAI:
                 raise ImportError("Bitte `pip install openai` für llama-server-Support.")
-            key = self.openai_key or self.openrouter_key or "not-needed"
+            key = self.openai_key or "not-needed"
             self._clients[provider] = OpenAI(
                 base_url=self.llama_server_base_url,
                 api_key=key,
@@ -216,6 +233,29 @@ class UnifiedLLM:
             self._models[provider] = _get_model_for_provider(self.config, provider)
         else:
             raise ValueError(f"Unbekannter LLM-Provider: {provider}")
+
+    def _openrouter_json_mode_supported(self) -> Optional[bool]:
+        """Resolve OpenRouter response_format support without catalog access.
+
+        ``openrouter_json_mode`` is an explicit capability override. If absent,
+        ``openrouter_supported_parameters`` may be supplied from catalog metadata.
+        Missing metadata means unknown, and unknown is treated as unsupported.
+        """
+        explicit = self.config.get("openrouter_json_mode")
+        if explicit is not None:
+            value = str(explicit).strip().lower()
+            if value in ("supported", "true", "yes", "1"):
+                return True
+            if value in ("unsupported", "false", "no", "0"):
+                return False
+            return None
+
+        params = self.config.get("openrouter_supported_parameters")
+        if isinstance(params, (list, tuple, set)):
+            return "response_format" in params
+        if isinstance(params, str):
+            return "response_format" in [p.strip() for p in params.split(",")]
+        return None
 
     def _chat_with_provider(
         self,
@@ -262,12 +302,33 @@ class UnifiedLLM:
                     "temperature": temp,
                 }
                 if json_mode:
-                    kwargs["response_format"] = {"type": "json_object"}
+                    if provider == "openrouter":
+                        if self._openrouter_json_mode_supported() is True:
+                            kwargs["response_format"] = {"type": "json_object"}
+                    else:
+                        kwargs["response_format"] = {"type": "json_object"}
                 if max_tokens:
                     kwargs["max_tokens"] = max_tokens
                 res = client.chat.completions.create(**kwargs)
                 return clean_thinking(res.choices[0].message.content)
             except Exception as e:
+                if (
+                    json_mode
+                    and provider == "openrouter"
+                    and "response_format" in kwargs
+                    and _is_unsupported_response_format_error(e)
+                ):
+                    retry_kwargs = dict(kwargs)
+                    retry_kwargs.pop("response_format", None)
+                    try:
+                        res = client.chat.completions.create(**retry_kwargs)
+                        return clean_thinking(res.choices[0].message.content)
+                    except Exception as retry_e:
+                        print(
+                            f"❌ {provider} Error after retry without "
+                            f"response_format: {retry_e}"
+                        )
+                        return ""
                 print(f"❌ {provider} Error: {e}")
                 return ""
         else:
@@ -308,7 +369,17 @@ class UnifiedLLM:
             print(f"❌ Provider {primary} nicht verfügbar: {e}")
             text = ""
 
+        if not text and (self.provider_explicit or self.model_explicit):
+            raise RuntimeError(
+                f"Provider/model explicitly selected ({primary} / {self.model}); "
+                "fallback disabled."
+            )
+
         if not text and self.fallback_provider and self.fallback_provider != primary:
+            if self.fallback_provider in ("openrouter", "openai", "gemini"):
+                print(
+                    f"⚠️ Switching to cloud fallback provider: {self.fallback_provider}"
+                )
             try:
                 text = self._chat_with_provider(
                     self.fallback_provider,
@@ -330,28 +401,49 @@ class UnifiedLLM:
         user_p: str,
         temp: float = 0.2,
     ) -> Optional[str]:
-        if self.is_gemini:
+        primary = self.provider
+        try:
             text = self._chat_with_provider(
-                "gemini", sys_p, user_p, temp=temp, json_mode=True
+                primary, sys_p, user_p, temp=temp, json_mode=True
             )
-            if not text and self.fallback_provider and self.fallback_provider != "gemini":
-                try:
-                    text = self._chat_with_provider(
-                        self.fallback_provider,
-                        sys_p,
-                        user_p,
-                        temp=temp,
-                        json_mode=True,
-                    )
-                except Exception as e:
-                    print(
-                        f"❌ Fallback-Provider {self.fallback_provider} nicht verfügbar: {e}"
-                    )
-                    text = ""
-            return clean_json_text(text) or None
+        except Exception as e:
+            print(f"❌ Provider {primary} nicht verfügbar: {e}")
+            text = ""
 
-        text = self.chat(sys_p, user_p, temp=temp)
-        return clean_json_text(text) or None
+        if not text and (self.provider_explicit or self.model_explicit):
+            raise RuntimeError(
+                f"Provider/model explicitly selected ({primary} / {self.model}); "
+                "fallback disabled."
+            )
+
+        if not text and self.fallback_provider and self.fallback_provider != primary:
+            if self.fallback_provider in ("openrouter", "openai", "gemini"):
+                print(
+                    f"⚠️ Switching to cloud fallback provider: {self.fallback_provider}"
+                )
+            try:
+                text = self._chat_with_provider(
+                    self.fallback_provider,
+                    sys_p,
+                    user_p,
+                    temp=temp,
+                    json_mode=True,
+                )
+            except Exception as e:
+                print(
+                    f"❌ Fallback-Provider {self.fallback_provider} nicht verfügbar: {e}"
+                )
+                text = ""
+        cleaned = clean_json_text(text)
+        if not cleaned:
+            return None
+        try:
+            json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid JSON output from {primary}/{self.model}: {exc}"
+            ) from exc
+        return cleaned
 
     def unload(self) -> None:
         if self.provider in ("gemini", "openrouter", "openai", "llama-server"):

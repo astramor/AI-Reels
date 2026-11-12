@@ -161,6 +161,7 @@ input/
 !EXAMPLES.md
 !GEMINI.md
 !tests/fixtures/*.md
+!docs/MODEL_EVAL.md
 !tests/fixtures/*.srt
 
 # Environments

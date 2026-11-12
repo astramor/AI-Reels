@@ -150,6 +150,36 @@ def test_non_empty_yaml_api_keys_are_used_when_environment_absent(tmp_path, monk
     assert settings.gemini_api_key.get_secret_value() == "yaml-gemini"
 
 
+def test_openrouter_empty_yaml_key_does_not_erase_environment(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "openrouter_api_key: ''\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "env-openrouter")
+
+    defaults = load_yaml_defaults()
+    assert "openrouter_api_key" not in defaults
+
+    settings = Settings(**defaults)
+    assert settings.openrouter_api_key.get_secret_value() == "env-openrouter"
+
+
+def test_openrouter_environment_wins_over_non_empty_yaml(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "openrouter_api_key: yaml-openrouter\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "env-openrouter")
+
+    defaults = load_yaml_defaults()
+    assert "openrouter_api_key" not in defaults
+
+    settings = Settings(**defaults)
+    assert settings.openrouter_api_key.get_secret_value() == "env-openrouter"
+
+
 def test_check_models_uses_environment_with_empty_or_null_yaml(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "config.yaml").write_text(

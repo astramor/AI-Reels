@@ -465,3 +465,36 @@ def test_local_max_highlights_rejects_zero_negative_and_invalid(tmp_path):
             local_summarizer.run(
                 make_local_args(srt_path, tmp_path / "out", max_highlights=value)
             )
+
+
+def test_local_run_sets_model_explicit_for_cli_model(tmp_path, monkeypatch):
+    srt_path = tmp_path / "sermon.srt"
+    make_regular_srt(srt_path)
+    out_dir = tmp_path / "out"
+
+    args = make_local_args(srt_path, out_dir)
+    args.model = "deepseek/deepseek-v4.1-flash"
+    args.llm_provider = "openrouter"
+
+    captured = {}
+
+    class FakeLLM:
+        is_cloud_llm = True
+
+        def __init__(self, conf):
+            captured.update(conf)
+            self.provider = conf.get("llm_provider", "ollama")
+            self.model = conf.get("openrouter_model") or conf.get("llm_model")
+
+        def chat(self, sys_p, user_p, temp=0.1):
+            if sys_p == "Scout":
+                return "- [00:00:00] Predigttext mit vielen Wörtern und Details"
+            if sys_p == "Editor":
+                return "- [00:00:00] Predigttext mit vielen Wörtern und Details"
+            return "summary"
+
+    monkeypatch.setattr(local_summarizer, "UnifiedLLM", FakeLLM)
+    local_summarizer.run(args)
+
+    assert captured["model_explicit"] is True
+    assert captured["openrouter_model"] == "deepseek/deepseek-v4.1-flash"
