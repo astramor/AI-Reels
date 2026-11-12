@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import time
 import random
+import math
 from pathlib import Path
 from typing import List, Optional, Tuple
 from loguru import logger
@@ -24,6 +25,7 @@ from domains.video.hardware import detect_available_nvenc_codecs
 from core.config import settings
 from core.commands import run_command
 from core.artifacts import ArtifactManager, save_json
+from core.span_contract import ClipSpan, SpanValidationError, clamp_end_to_max, validate_span
 
 # ==============================================================================
 # 1. HELPERS
@@ -69,6 +71,23 @@ def probe_wh(path: Path) -> Tuple[int, int]:
             return int(st["width"]), int(st["height"])
     raise RuntimeError("Konnte Video-Breite/Höhe nicht ermitteln")
 
+
+def probe_duration(path: Path) -> float:
+    """Return the source media duration in seconds via ffprobe."""
+    info = ffprobe_json(path)
+    duration = info.get("format", {}).get("duration")
+    if duration is None:
+        for st in info.get("streams", []):
+            if st.get("codec_type") == "video" and st.get("duration") is not None:
+                duration = st["duration"]
+                break
+    if duration is None:
+        raise RuntimeError("Konnte Video-Dauer nicht ermitteln")
+    duration = float(duration)
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError(f"Ungültige Video-Dauer: {duration!r}")
+    return duration
+
 def get_random_music(music_dir: Path) -> Optional[Path]:
     if not music_dir or not music_dir.exists():
         return None
@@ -84,6 +103,77 @@ def get_random_music(music_dir: Path) -> Optional[Path]:
 # ==============================================================================
 # 2. CORE CLIP PROCESSING
 # ==============================================================================
+
+def finalize_highlight(
+    h: Highlight,
+    words: List[dict],
+    srt_items: List,
+    transcription_json: Optional[Path],
+    sub_processor: SubtitleProcessor,
+    media_duration: Optional[float],
+    min_duration: float,
+    max_duration: float,
+) -> Optional[Highlight]:
+    """Finalize a candidate highlight once, then validate it against the contract."""
+    if h.finalized:
+        try:
+            validate_span(
+                ClipSpan(start=h.start, end=h.end, title=h.label, finalized=True),
+                media_duration=media_duration,
+                min_duration=min_duration,
+                max_duration=max_duration,
+            )
+        except SpanValidationError as e:
+            logger.warning(f"⚠️ Clip '{h.label}' verworfen: {e}")
+            return None
+        return h
+
+    approx_start = max(0.0, h.start - settings.preroll)
+    start_abs = sub_processor.snap_start_to_json_word(
+        transcription_json, approx_start, window=0.3
+    )
+
+    needs_snap = h.end is None
+    if not needs_snap and words:
+        needs_snap = not any(
+            abs(float(w.get("end", 0.0)) - h.end) <= 0.3 for w in words
+        )
+
+    if needs_snap:
+        if words:
+            logger.info(f"📍 Clip '{h.label}' Endzeit wird prosodisch bestimmt...")
+            end_abs = sub_processor.find_prosodic_smart_end(
+                words, start_abs, min_dur=18.0, max_dur=max_duration
+            )
+        elif srt_items:
+            logger.info(f"📍 Clip '{h.label}' hat keine Endzeit. Suche Smart Cut...")
+            end_abs = sub_processor.find_smart_end(
+                srt_items, start_abs, min_dur=18.0, max_dur=max_duration
+            )
+        else:
+            end_abs = start_abs + max_duration
+    else:
+        end_abs = h.end + settings.postroll
+
+    end_abs = clamp_end_to_max(
+        start_abs, end_abs, max_duration, media_duration
+    )
+    try:
+        span = validate_span(
+            ClipSpan(start=start_abs, end=end_abs, title=h.label, finalized=True),
+            media_duration=media_duration,
+            min_duration=min_duration,
+            max_duration=max_duration,
+        )
+    except SpanValidationError as e:
+        logger.warning(f"⚠️ Clip '{h.label}' verworfen: {e}")
+        return None
+
+    h.start = span.start
+    h.end = span.end
+    h.finalized = True
+    return h
+
 
 def prepare_render_job(
     idx: int,
@@ -106,18 +196,21 @@ def prepare_render_job(
     """
     Bereitet einen einzelnen Render-Job vor: Timing, Tracking, Karaoke.
     """
-    # 1. Timing-Berechnung
-    approx_start = max(0, h.start - settings.preroll)
-    start_abs = sub_processor.snap_start_to_json_word(json_path, approx_start, window=0.3)
+    # 1. Timing: finalized spans are authoritative; no preroll/postroll,
+    # no start snap, no end recomputation, and no max_window truncation.
+    if not h.finalized:
+        raise ValueError(f"Clip '{h.label}' ist nicht finalisiert")
+    if h.end is None:
+        raise ValueError(f"Clip '{h.label}' hat keine finalisierte Endzeit")
 
-    if h.end is not None:
-        calculated_dur = h.end - start_abs + settings.postroll
-        dur = min(calculated_dur, settings.max_window)
-    else:
-        dur = settings.max_window
-
-    if dur < 1.0:
-        dur = 5.0
+    start_abs = h.start
+    dur = h.end - h.start
+    if dur <= 0:
+        raise ValueError(f"Clip '{h.label}' hat keine positive Dauer")
+    if dur > settings.max_window + 1e-6:
+        raise ValueError(
+            f"Clip '{h.label}' Dauer {dur:.3f}s überschreitet max_window {settings.max_window:.3f}s"
+        )
 
     # 2. Dateinamen & Titel
     title_text = titleize_label(h.label, 50, 3) if settings.overlay_title else None
@@ -351,6 +444,11 @@ def run_smart_pipeline(
     hl_parser = HighlightParser()
     marks = hl_parser.load_highlights_from_json(final_spans_json)
     src_w, src_h = probe_wh(video)
+    try:
+        media_duration = probe_duration(video)
+    except Exception as e:
+        logger.warning(f"⚠️ ffprobe-Dauer nicht ermittelbar: {e}")
+        media_duration = None
     target_w, target_h = 1080, 1920
 
     # 3. Musik-Setup (CLI overrides settings.music_dir if provided)
@@ -372,22 +470,33 @@ def run_smart_pipeline(
         else []
     )
 
-    for h in marks:
-        needs_snap = h.end is None
-        if not needs_snap and words:
-            needs_snap = not any(abs(w.get("end", 0.0) - h.end) <= 0.3 for w in words)
+    if media_duration is None:
+        proxy = srt_items[-1].end.total_seconds() if srt_items else None
+        if proxy is not None and math.isfinite(proxy) and proxy > 0:
+            logger.warning(
+                f"⚠️ Nutze SRT-Ende als Mediendauer-Proxy: {proxy:.3f}s"
+            )
+            media_duration = proxy
+        else:
+            logger.warning(
+                "⚠️ Mediendauer unbekannt; keine Media-Boundary-Prüfung"
+            )
 
-        if needs_snap:
-            if words:
-                logger.info(f"📍 Clip '{h.label}' Endzeit wird prosodisch bestimmt...")
-                h.end = sub_processor.find_prosodic_smart_end(
-                    words, h.start, min_dur=18.0, max_dur=settings.max_window
-                )
-            elif srt_items:
-                logger.info(f"📍 Clip '{h.label}' hat keine Endzeit. Suche Smart Cut...")
-                h.end = sub_processor.find_smart_end(
-                    srt_items, h.start, min_dur=18.0, max_dur=settings.max_window
-                )
+    finalized_marks = []
+    for h in marks:
+        finalized = finalize_highlight(
+            h,
+            words,
+            srt_items,
+            transcription_json,
+            sub_processor,
+            media_duration,
+            settings.span_min,
+            settings.max_window,
+        )
+        if finalized is not None:
+            finalized_marks.append(finalized)
+    marks = finalized_marks
     # -------------------------------
     
     # --- ARTIFACT MANAGER: Render Plan speichern ---
@@ -396,7 +505,7 @@ def run_smart_pipeline(
         "target_resolution": f"{target_w}x{target_h}",
         "music": str(music_file) if music_file else None,
         "clips": [
-            {"id": i, "start": h.start, "end": h.end, "title": h.label} for i, h in enumerate(marks, 1)
+            {"id": i, "start": h.start, "end": h.end, "title": h.label, "finalized": True} for i, h in enumerate(marks, 1)
         ]
     }
     save_json(am.get_path("render_plan.json"), render_plan)
@@ -498,6 +607,7 @@ if __name__ == "__main__":
                         "start": h.start,
                         "end": h.end if h.end is not None else h.start + 60.0,
                         "reason": "Markdown highlight",
+                        "finalized": h.finalized,
                     }
                     for h in marks
                 ]

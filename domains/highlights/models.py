@@ -9,6 +9,7 @@ class HighlightItem(BaseModel):
     reason: str = Field(..., description="Warum dieser Clip stark ist")
     hook: Optional[str] = Field(None, description="Optionaler Einstiegssatz oder Hook")
     confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    finalized: bool = Field(False, strict=True, description="True für autoritative, bereits validierte Spans")
 
     @model_validator(mode='after')
     def check_duration(self):
@@ -26,8 +27,20 @@ class HighlightPayload(BaseModel):
 
     @model_validator(mode='after')
     def remove_overlaps_and_sort(self):
+        # Explicitly finalized spans are authoritative and must not be altered.
+        # Candidate overlap selection still applies to candidates only.
+        finalized = [hl for hl in self.highlights if hl.finalized]
+        candidates = [hl for hl in self.highlights if not hl.finalized]
+
+        for i, a in enumerate(finalized):
+            for b in finalized[i + 1:]:
+                if a.start < b.end and b.start < a.end:
+                    raise ValueError(
+                        f"Finalisierte Spans '{a.title}' und '{b.title}' überschneiden sich."
+                    )
+
         # Nach Startzeit sortieren
-        sorted_hl = sorted(self.highlights, key=lambda x: x.start)
+        sorted_hl = sorted(candidates, key=lambda x: x.start)
         filtered = []
         for hl in sorted_hl:
             # Überschneidungs-Logik: Falls Startzeit des neuen Clips vor (Endzeit - 10s) des alten liegt
@@ -43,5 +56,6 @@ class HighlightPayload(BaseModel):
                     logger.info(f"Verwerfe '{hl.title}'.")
             else:
                 filtered.append(hl)
-        self.highlights = filtered
+
+        self.highlights = finalized + filtered
         return self

@@ -86,13 +86,16 @@ Style: Default,Arial,85,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
+        clip_end_abs = start_abs + duration
         all_words = []
         for seg in data.get("segments", []):
             for w in seg.get("words", []):
-                if w["end"] > start_abs:
+                if w["end"] > start_abs and w["start"] < clip_end_abs:
                     w_clean = w.copy()
                     if w_clean["start"] < start_abs:
                         w_clean["start"] = start_abs
+                    if w_clean["end"] > clip_end_abs:
+                        w_clean["end"] = clip_end_abs
                     all_words.append(w_clean)
 
         if not all_words:
@@ -309,3 +312,78 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
         candidates.sort(key=lambda item: item[0], reverse=True)
         return candidates[0][1] + 0.15
+
+    def snap_start_to_sentence_begin(
+        self,
+        words: List[dict],
+        approx_start_sec: float,
+        search_window: float = 3.0,
+        min_pause: float = 0.30,
+    ) -> float:
+        """Snap a chosen clip start to a nearby clean sentence beginning."""
+        if not words:
+            return approx_start_sec
+
+        words = sorted(words, key=lambda w: float(w.get("start", 0.0) or 0.0))
+        search_min = max(0.0, approx_start_sec - search_window)
+        search_max = approx_start_sec + search_window
+
+        candidates = []
+        for i, w in enumerate(words):
+            try:
+                w_start = float(w["start"])
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            if w_start < search_min or w_start > search_max:
+                continue
+
+            current_text = str(w.get("word", "")).strip()
+            if not current_text:
+                continue
+
+            current_clean = current_text.strip(",.!?").lower()
+            starts_upper = current_text[0].isupper()
+            not_conjunction = current_clean not in {
+                "und",
+                "aber",
+                "denn",
+                "weil",
+                "oder",
+            }
+
+            if i == 0:
+                pause = 1.0
+                has_punctuation = False
+                is_first = True
+            else:
+                prev = words[i - 1]
+                try:
+                    prev_end = float(prev["end"])
+                except (KeyError, TypeError, ValueError):
+                    prev_end = w_start
+
+                pause = w_start - prev_end
+                if pause < min_pause:
+                    continue
+
+                prev_text = str(prev.get("word", "")).strip()
+                has_punctuation = prev_text.endswith((".", "!", "?"))
+                is_first = False
+
+            distance = abs(w_start - approx_start_sec)
+            score = (
+                (3.0 if has_punctuation else 0.0)
+                + (2.0 if starts_upper and not_conjunction else 0.0)
+                + min(pause, 1.0)
+                - distance * 0.3
+                + (1.0 if is_first else 0.0)
+            )
+            candidates.append((score, w_start))
+
+        if not candidates:
+            return approx_start_sec
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        best_start = candidates[0][1]
+        return max(0.0, best_start - 0.10)

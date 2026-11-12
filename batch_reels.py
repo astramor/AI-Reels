@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import argparse, os, sys, subprocess, shlex, json, yaml, shutil, re, signal
+import argparse, os, sys, subprocess, shlex, json, yaml, shutil, re, signal, math
 from pathlib import Path
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +9,13 @@ from loguru import logger
 import srt
 from core.time_utils import hms_to_seconds, parse_time_to_seconds, seconds_to_hms
 from core.config import settings, SETTINGS_ALIASES
+from core.span_contract import (
+    ClipSpan,
+    SpanValidationError,
+    ensure_no_finalized_overlap,
+    parse_finalized_flag,
+    validate_span,
+)
 from domains.highlights.parser import HighlightParser
 from domains.video.renderer import gpu_semaphore
 from core.commands import run_command, ProcessRegistry
@@ -75,8 +82,10 @@ def parse_highlights_md(md_path: Path):
         spans.append({
             "start": h.start,
             "end": h.end if h.end is not None else (h.start + 60),
-            "title": h.label
+            "title": h.label,
+            "finalized": h.finalized,
         })
+    ensure_no_finalized_overlap(spans)
     return spans
 
 
@@ -92,18 +101,54 @@ def parse_spans_json(json_path: Path):
         return []
 
     items = data.get("highlights", data) if isinstance(data, dict) else data
+    # Legacy fallback rule:
+    # - reel_spans.json without metadata -> finalized
+    # - any other artifact without metadata -> candidate
+    # Explicit finalized metadata always wins, even after renaming/copying.
+    legacy_finalized = json_path.name == "reel_spans.json"
     spans = []
     for item in items:
         if not isinstance(item, dict):
             continue
         start_val = item.get("start", 0.0)
         end_val = item.get("end", parse_time_to_seconds(start_val) + 60.0)
+        try:
+            finalized = parse_finalized_flag(
+                item.get("finalized"), legacy_finalized
+            )
+        except SpanValidationError as e:
+            logger.warning(
+                f"⚠️ Span mit Start {start_val!r} verworfen: {e}"
+            )
+            continue
         spans.append({
             "start": parse_time_to_seconds(start_val),
             "end": parse_time_to_seconds(end_val),
             "title": item.get("title", "Highlight"),
+            "finalized": finalized,
         })
+    ensure_no_finalized_overlap(spans)
     return spans
+
+
+def probe_media_duration(video_path: Path) -> float:
+    """Return the source media duration in seconds via ffprobe."""
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_format",
+        "-print_format", "json",
+        str(video_path),
+    ]
+    result = run_command(cmd)
+    info = json.loads(result.stdout)
+    duration = info.get("format", {}).get("duration")
+    if duration is None:
+        raise RuntimeError("Konnte Video-Dauer nicht ermitteln")
+    duration = float(duration)
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError(f"Ungültige Video-Dauer: {duration!r}")
+    return duration
 
 
 def get_json_slice(json_path, start_sec, end_sec):
@@ -217,6 +262,7 @@ def render_clip(item, vid, reels_out, summ_dir, stem, args):
                     "start": current_start,
                     "end": current_end,
                     "reason": item.get("reason", "Batch clip"),
+                    "finalized": item.get("finalized", True),
                 }
             ]
         }
@@ -551,17 +597,54 @@ def execute_span_builder(hl_md, predigt_srt, spans_md, spans_json, args, transcr
 
 
 def execute_render_orchestration(vid, stem, summ_dir, json_file, predigt_srt, spans_json, out_reels, args):
-    spans_content = parse_spans_json(spans_json)
+    try:
+        spans_content = parse_spans_json(spans_json)
+    except SpanValidationError as e:
+        logger.error(f"❌ Spans-JSON ungültig: {e}")
+        return
+
     reels_out = out_reels / stem
     reels_out.mkdir(parents=True, exist_ok=True)
 
     render_queue = []
     all_subs = load_srt_file(predigt_srt)
 
+    try:
+        media_duration = probe_media_duration(vid)
+    except Exception as e:
+        logger.warning(f"⚠️ ffprobe-Dauer nicht ermittelbar: {e}")
+        proxy = all_subs[-1].end.total_seconds() if all_subs else None
+        if proxy is not None and math.isfinite(proxy) and proxy > 0:
+            logger.warning(
+                f"⚠️ Nutze SRT-Ende als Mediendauer-Proxy: {proxy:.3f}s"
+            )
+            media_duration = proxy
+        else:
+            logger.warning(
+                "⚠️ Mediendauer unbekannt; keine Media-Boundary-Prüfung"
+            )
+            media_duration = None
+
     for idx, span in enumerate(spans_content, 1):
-        c_start = span["start"]
-        c_end = span["end"]
-        label = span["title"]
+        try:
+            validated = validate_span(
+                ClipSpan(
+                    start=span["start"],
+                    end=span["end"],
+                    title=span["title"],
+                    finalized=span.get("finalized", True),
+                ),
+                media_duration=media_duration,
+                min_duration=settings.span_min,
+                max_duration=settings.max_window,
+            )
+        except SpanValidationError as e:
+            logger.warning(f"⚠️ Clip {idx} verworfen: {e}")
+            continue
+
+        c_start = validated.start
+        c_end = validated.end
+        label = validated.title
         temp_srt_path = summ_dir / f"temp_edit_reel_{idx}.srt"
         temp_json_path = summ_dir / f"temp_edit_reel_{idx}.json"
 
@@ -585,13 +668,16 @@ def execute_render_orchestration(vid, stem, summ_dir, json_file, predigt_srt, sp
             "temp_srt": temp_srt_path,
             "temp_json": temp_json_path,
             "title": label,
+            "finalized": validated.finalized,
         })
 
     if args.confirm_subtitles:
         print(f"\n✋ PAUSE: 'Endkontrolle' für {len(render_queue)} Clips. ENTER zum Rendern...")
         input()
 
-    # Final logic for each item before rendering
+    # Final logic for each item before rendering.
+    # Finalized spans keep their authoritative boundaries; edited subtitle
+    # files may change the subtitle payload, but not the clip boundaries.
     for item in render_queue:
         current_start = item["start"]
         current_end = item["end"]
@@ -603,8 +689,9 @@ def execute_render_orchestration(vid, stem, summ_dir, json_file, predigt_srt, sp
                 with open(item["temp_json"], "r", encoding="utf-8") as f:
                     edited_json = json.load(f)
                 if edited_json and edited_json.get("segments"):
-                    current_start = edited_json["segments"][0]["start"]
-                    current_end = edited_json["segments"][-1]["end"]
+                    if not item["finalized"]:
+                        current_start = edited_json["segments"][0]["start"]
+                        current_end = edited_json["segments"][-1]["end"]
                     new_subs = json_to_srt(edited_json)
                     item["temp_srt"].write_text(srt.compose(new_subs), encoding="utf-8")
                     final_srt_arg = str(item["temp_srt"])
@@ -612,11 +699,12 @@ def execute_render_orchestration(vid, stem, summ_dir, json_file, predigt_srt, sp
             elif item["temp_srt"].exists():
                 edited_subs = load_srt_file(item["temp_srt"])
                 if edited_subs:
-                    ns, ne = get_times_from_srt(edited_subs)
-                    if ns is not None:
-                        current_start, current_end = ns, ne
-                        final_srt_arg = str(item["temp_srt"])
-        
+                    if not item["finalized"]:
+                        ns, ne = get_times_from_srt(edited_subs)
+                        if ns is not None:
+                            current_start, current_end = ns, ne
+                    final_srt_arg = str(item["temp_srt"])
+
         item["start"] = current_start
         item["end"] = current_end
         item["final_srt_arg"] = final_srt_arg

@@ -8,11 +8,13 @@ build_highlight_spans.py (ULTIMATE HYBRID EDITION)
 - PROMPTS: Vollständig isolierte Prompts für Ollama und Gemini!
 """
 
-import argparse, pathlib, re, json, yaml, difflib
+import argparse, pathlib, re, json, yaml, difflib, math
 from datetime import datetime
+from typing import Optional
 import srt
 from core.time_utils import parse_time_to_seconds, seconds_to_hms, seconds_to_hms_ms, hms_to_seconds
 from core.llm_client import UnifiedLLM, clean_thinking
+from core.span_contract import ClipSpan, SpanValidationError, clamp_end_to_max, validate_span
 from domains.transcription.processor import SubtitleProcessor
 
 # ====================== CONFIG ======================
@@ -299,6 +301,24 @@ def parse_highlights_json(path):
         text = f"{title}: {reason}" if reason else title
         entries.append({"sec": start, "text": text})
     return entries
+
+
+def finalize_clip_span(
+    start_s: float,
+    end_s: float,
+    title: str,
+    media_duration: Optional[float],
+    min_duration: float,
+    max_duration: float,
+) -> ClipSpan:
+    """Clamp an over-long end and validate the final clip span."""
+    end_s = clamp_end_to_max(start_s, end_s, max_duration, media_duration)
+    return validate_span(
+        ClipSpan(start=start_s, end=end_s, title=title, finalized=True),
+        media_duration=media_duration,
+        min_duration=min_duration,
+        max_duration=max_duration,
+    )
 
 
 def _position_label(sec, total_duration):
@@ -678,7 +698,21 @@ def main():
         print("\n⚠️  WARNUNG: LLM Modus ist DEAKTIVIERT. Erstelle Placeholder-Titel.\n")
 
     subs = load_srt(args.srt)
-    total_duration = subs[-1].end.total_seconds() if subs else 0
+    total_duration = 0.0
+    media_duration: Optional[float] = None
+    if subs:
+        raw_duration = subs[-1].end.total_seconds()
+        if math.isfinite(raw_duration) and raw_duration > 0:
+            total_duration = raw_duration
+            media_duration = raw_duration
+            print(f"ℹ️ Mediendauer-Proxy aus SRT-Ende: {raw_duration:.3f}s")
+        else:
+            print(
+                f"⚠️ SRT-Ende als Mediendauer-Proxy ungültig: {raw_duration!r}; "
+                "Media-Boundary unbekannt"
+            )
+    else:
+        print("⚠️ Keine SRT-Daten; Mediendauer unbekannt")
 
     processor = SubtitleProcessor()
     transcription_json = (
@@ -780,7 +814,7 @@ def main():
             for s in subs:
                 if s.end.total_seconds() > start_s + args.target_min:
                     if re.search(r"[.!?]", s.content):
-                        end_s = int(s.end.total_seconds())
+                        end_s = s.end.total_seconds()
                         break
 
         # A.2 ACOUSTIC PAUSE SNAP (only when WhisperX words are available)
@@ -792,6 +826,22 @@ def main():
                 min_duration=args.target_min,
                 max_duration=args.target_max,
             )
+
+        # A.3 FINAL VALIDATION: clamp over-long ends, reject impossible spans.
+        try:
+            final_span = finalize_clip_span(
+                start_s,
+                end_s,
+                "",
+                media_duration,
+                args.target_min,
+                args.target_max,
+            )
+        except SpanValidationError as e:
+            print(f"⚠️ Clip {i} verworfen: {e}")
+            continue
+        start_s = final_span.start
+        end_s = final_span.end
 
         # B. TITLE GENERATION
         title = "Clip Highlight"
@@ -822,6 +872,7 @@ def main():
                 "title": title,
                 "monday": posts["monday"],
                 "friday": posts["friday"],
+                "finalized": True,
             }
         )
 
