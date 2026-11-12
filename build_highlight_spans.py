@@ -8,22 +8,12 @@ build_highlight_spans.py (ULTIMATE HYBRID EDITION)
 - PROMPTS: Vollständig isolierte Prompts für Ollama und Gemini!
 """
 
-import argparse, pathlib, re, json, yaml, time, difflib
+import argparse, pathlib, re, json, yaml, difflib
 from datetime import datetime
 import srt
-from core.time_utils import parse_time_to_seconds, seconds_to_hms, hms_to_seconds
-
-
-try:
-    from ollama import Client as OllamaClient
-except ImportError:
-    OllamaClient = None
-
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    genai = None
+from core.time_utils import parse_time_to_seconds, seconds_to_hms, seconds_to_hms_ms, hms_to_seconds
+from core.llm_client import UnifiedLLM, clean_thinking
+from domains.transcription.processor import SubtitleProcessor
 
 # ====================== CONFIG ======================
 
@@ -176,86 +166,28 @@ HEADLINE: [Stimmungsvolle Headline]
 BODY: [Dein Text, die Einladung, die Fakten und Hashtags]
 """
 
+SCORE_SYSTEM_PROMPT = """Du bist ein Social-Media-Redakteur für virale Reels.
+Bewerte Predigt-Highlight-Kandidaten mit drei Kriterien auf einer Skala von 1 bis 10:
+1. hook_strength: Sofortige Aufmerksamkeit und Neugier-Faktor in den ersten 3 Sekunden.
+2. standalone_clarity: Verständlichkeit ohne Vorwissen aus dem Rest der Predigt.
+3. emotional_or_practical_value: Konkreter Alltagsbezug, Tiefgang oder Humor.
+
+Antworte ausschließlich mit gültigem JSON. Keine Erklärungen, kein Markdown."""
+
+SCORE_USER_PROMPT = """Bewerte ALLE folgenden Kandidaten. Jeder Kandidat hat eine ID,
+eine Zeitposition (Anfang, Hauptteil, Schluss) und einen Beschreibungstext.
+
+--- KANDIDATEN ---
+{clips_json}
+
+Antworte exakt in diesem JSON-Schema:
+{{"scores": [{{"id": 1, "hook_strength": 8, "standalone_clarity": 7, "emotional_or_practical_value": 9}}, ...]}}
+"""
+
 
 # ====================== LLM Wrapper ======================
 
-
-def clean_thinking(text):
-    if not text:
-        return ""
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    return re.sub(r"<think>.*", "", text, flags=re.DOTALL).strip()
-
-
-class UnifiedLLM:
-    def __init__(self, config):
-        self.provider = config.get("llm_provider", "ollama").lower()
-        self.model = config.get("llm_model", DEFAULT_MODEL)
-
-        self.gemini_key = config.get("gemini_api_key", "")
-
-        if self.gemini_key and self.provider == "gemini":
-            self.client = genai.Client(api_key=self.gemini_key)
-            self.model = config.get("gemini_model", "gemini-1.5-flash")
-            self.is_gemini = True
-            print(f"🚀 GEMINI MODE AKTIV: {self.model}")
-        else:
-            self.client = OllamaClient(host="http://127.0.0.1:11434")
-            self.is_gemini = False
-            print(f"🦙 OLLAMA MODE AKTIV: {self.model}")
-
-    def chat_json(self, sys_p, user_p):
-        if self.is_gemini:
-            try:
-                time.sleep(1)
-                res = self.client.models.generate_content(
-                    model=self.model,
-                    contents=user_p,
-                    config=types.GenerateContentConfig(
-                        system_instruction=sys_p,
-                        temperature=0.7,
-                        response_mime_type="application/json",
-                    ),
-                )
-                return res.text
-            except Exception as e:
-                print(f"❌ Gemini JSON Error: {e}")
-                return None
-        return None
-
-    def chat(self, sys, user, temp=0.8, max_tokens=None):
-        if self.is_gemini:
-            try:
-                time.sleep(1)
-                res = self.client.models.generate_content(
-                    model=self.model,
-                    contents=user,
-                    config=types.GenerateContentConfig(
-                        system_instruction=sys, temperature=temp
-                    ),
-                )
-                return clean_thinking(res.text)
-            except Exception as e:
-                print(f"LLM Error: {e}")
-                return ""
-        else:
-            try:
-                opts = {"temperature": temp, "num_ctx": 4096}
-                if max_tokens:
-                    opts["num_predict"] = max_tokens
-
-                res = self.client.chat(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": sys},
-                        {"role": "user", "content": user},
-                    ],
-                    options=opts,
-                )
-                return clean_thinking(res["message"]["content"])
-            except Exception as e:
-                print(f"LLM Error: {e}")
-                return ""
+# UnifiedLLM and clean_thinking are imported from core.llm_client.
 
 
 # ====================== Helper Functions ======================
@@ -351,7 +283,86 @@ def parse_longlist(path):
     return entries
 
 
-def balance_highlights_from_data(entries, total_duration, target_count):
+def parse_highlights_json(path):
+    """Parse the strict highlights.json payload into longlist-style entries."""
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    items = data.get("highlights", data) if isinstance(data, dict) else data
+    entries = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        start = parse_time_to_seconds(item.get("start", 0.0))
+        title = str(item.get("title", "")).strip()
+        reason = str(item.get("reason", "")).strip()
+        text = f"{title}: {reason}" if reason else title
+        entries.append({"sec": start, "text": text})
+    return entries
+
+
+def _position_label(sec, total_duration):
+    if total_duration <= 0:
+        return "unknown"
+    ratio = sec / total_duration
+    if ratio < 1 / 3:
+        return "Anfang"
+    if ratio < 2 / 3:
+        return "Hauptteil"
+    return "Schluss"
+
+
+def score_candidates_with_llm(entries, total_duration, llm):
+    """Score all candidates in one structured JSON batch request."""
+    if not llm or not entries:
+        return None
+
+    clips = []
+    for i, entry in enumerate(entries, 1):
+        clips.append({
+            "id": i,
+            "start": seconds_to_hms(entry["sec"]),
+            "position": _position_label(entry["sec"], total_duration),
+            "text": entry["text"],
+        })
+
+    prompt = SCORE_USER_PROMPT.format(
+        clips_json=json.dumps(clips, ensure_ascii=False, indent=2)
+    )
+
+    try:
+        raw = llm.chat_json(SCORE_SYSTEM_PROMPT, prompt)
+        if not raw:
+            return None
+
+        data = json.loads(raw)
+        if isinstance(data, list):
+            score_items = data
+        elif isinstance(data, dict):
+            score_items = data.get("scores", [])
+        else:
+            return None
+
+        scores = {}
+        for item in score_items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                cid = int(item["id"])
+                hook = max(1, min(10, int(item["hook_strength"])))
+                clarity = max(1, min(10, int(item["standalone_clarity"])))
+                value = max(1, min(10, int(item["emotional_or_practical_value"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+            scores[cid] = hook + clarity + value
+
+        return scores or None
+    except Exception as e:
+        print(f"⚠️ LLM-Scoring fehlgeschlagen: {e}")
+        return None
+
+
+def _fallback_balance(entries, total_duration, target_count):
     if not entries:
         return []
     entries.sort(key=lambda x: x["sec"])
@@ -384,6 +395,72 @@ def balance_highlights_from_data(entries, total_duration, target_count):
                 )
                 selected.append(best)
                 used_indices.add(idx)
+
+    return sorted(selected, key=lambda x: x["sec"])
+
+
+def balance_highlights_from_data(
+    entries,
+    total_duration,
+    target_count,
+    llm=None,
+    min_gap_sec=30,
+):
+    if not entries or target_count <= 0:
+        return []
+
+    entries.sort(key=lambda x: x["sec"])
+    scores = score_candidates_with_llm(entries, total_duration, llm)
+    if not scores:
+        return _fallback_balance(entries, total_duration, target_count)
+
+    selected = []
+    selected_secs = []
+    used_indices = set()
+    sector_size = total_duration / target_count
+
+    for i in range(target_count):
+        sector_start = i * sector_size
+        sector_end = (i + 1) * sector_size
+
+        candidates = []
+        for idx, e in enumerate(entries):
+            if idx in used_indices:
+                continue
+            if sector_start <= e["sec"] < sector_end:
+                candidates.append((idx, e))
+
+        # Highest LLM score first, then earlier position as tie-breaker.
+        candidates.sort(key=lambda item: (-scores.get(item[0] + 1, 0), item[1]["sec"]))
+
+        chosen = None
+        for idx, e in candidates:
+            if all(abs(e["sec"] - s) >= min_gap_sec for s in selected_secs):
+                chosen = (idx, e)
+                break
+
+        if chosen is None:
+            remaining = [
+                (idx, e)
+                for idx, e in enumerate(entries)
+                if idx not in used_indices
+            ]
+            remaining.sort(
+                key=lambda item: (
+                    -scores.get(item[0] + 1, 0),
+                    abs(item[1]["sec"] - sector_start),
+                )
+            )
+            for idx, e in remaining:
+                if all(abs(e["sec"] - s) >= min_gap_sec for s in selected_secs):
+                    chosen = (idx, e)
+                    break
+
+        if chosen is not None:
+            idx, e = chosen
+            selected.append(e)
+            used_indices.add(idx)
+            selected_secs.append(e["sec"])
 
     return sorted(selected, key=lambda x: x["sec"])
 
@@ -548,9 +625,11 @@ def main():
     ap.add_argument("--srt", required=True)
     ap.add_argument("--out-md", required=True)
     ap.add_argument("--out-json")
+    ap.add_argument("--transcription-json")
     ap.add_argument("--target-count", type=int, default=6)
     ap.add_argument("--target-min", type=int, default=15)
     ap.add_argument("--target-max", type=int, default=60)
+    ap.add_argument("--min-gap-sec", type=int, default=30)
     ap.add_argument("--llm-titles", action="store_true")
     ap.add_argument("--no-llm", action="store_true")
 
@@ -601,6 +680,18 @@ def main():
     subs = load_srt(args.srt)
     total_duration = subs[-1].end.total_seconds() if subs else 0
 
+    processor = SubtitleProcessor()
+    transcription_json = (
+        pathlib.Path(args.transcription_json)
+        if args.transcription_json
+        else None
+    )
+    words = (
+        processor.load_words_from_json(transcription_json)
+        if transcription_json and transcription_json.exists()
+        else []
+    )
+
     hl_path = pathlib.Path(args.highlights)
     longlist_path = hl_path.parent / "highlights_longlist.md"
 
@@ -620,7 +711,11 @@ def main():
 
     print(f"Wähle {args.target_count} beste Clips aus {len(entries)} Kandidaten...")
     selected_entries = balance_highlights_from_data(
-        entries, total_duration, args.target_count
+        entries,
+        total_duration,
+        args.target_count,
+        llm=llm,
+        min_gap_sec=args.min_gap_sec,
     )
 
     # Sunday Info laden
@@ -688,6 +783,16 @@ def main():
                         end_s = int(s.end.total_seconds())
                         break
 
+        # A.2 ACOUSTIC PAUSE SNAP (only when WhisperX words are available)
+        if words:
+            end_s = processor.snap_end_to_speech_pause(
+                words,
+                chosen_end=end_s,
+                start_sec=start_s,
+                min_duration=args.target_min,
+                max_duration=args.target_max,
+            )
+
         # B. TITLE GENERATION
         title = "Clip Highlight"
         if llm and llm.is_gemini:
@@ -709,11 +814,11 @@ def main():
             ctx_for_posts = collect_context_timed(subs, start_s, end_s - start_s + 10)
             posts = llm_generate_posts(llm, title, ctx_for_posts, next_sunday)
 
-        lines.append(f"- [{seconds_to_hms(start_s)} -> {seconds_to_hms(end_s)}] {title}")
+        lines.append(f"- [{seconds_to_hms_ms(start_s)} -> {seconds_to_hms_ms(end_s)}] {title}")
         spans.append(
             {
-                "start": seconds_to_hms(start_s),
-                "end": seconds_to_hms(end_s),
+                "start": seconds_to_hms_ms(start_s),
+                "end": seconds_to_hms_ms(end_s),
                 "title": title,
                 "monday": posts["monday"],
                 "friday": posts["friday"],
@@ -722,7 +827,7 @@ def main():
 
         md_block = (
             f"### Reel {i}: {title}\n"
-            f"**Clip:** {seconds_to_hms(start_s)} - {seconds_to_hms(end_s)}\n\n"
+            f"**Clip:** {seconds_to_hms_ms(start_s)} - {seconds_to_hms_ms(end_s)}\n\n"
             f"#### 🗓️ MONDAY\n"
             f"**Headline:** {posts['monday']['headline']}\n\n"
             f"{posts['monday']['body']}\n\n"
@@ -736,22 +841,6 @@ def main():
 
     # Output
     out_md_path = pathlib.Path(args.out_md)
-    out_md_path.write_text("\n".join(lines), encoding="utf-8")
-
-    captions_file = out_md_path.parent / "reels_content.md"
-    captions_file.write_text("\n".join(captions_output), encoding="utf-8")
-    print(f"📄 Captions gespeichert in: {captions_file.name}")
-
-    if args.out_json:
-        pathlib.Path(args.out_json).write_text(
-            json.dumps(spans, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-    print("Fertig.")
-
-
-if __name__ == "__main__":
-    main()
-path = pathlib.Path(args.out_md)
     out_md_path.write_text("\n".join(lines), encoding="utf-8")
 
     captions_file = out_md_path.parent / "reels_content.md"

@@ -100,7 +100,8 @@ def prepare_render_job(
     tracker: FaceTracker,
     sub_processor: SubtitleProcessor,
     music_file: Optional[Path],
-    subtitles_path: Optional[Path]
+    subtitles_path: Optional[Path],
+    prefix: Optional[str] = None,
 ) -> RenderJob:
     """
     Bereitet einen einzelnen Render-Job vor: Timing, Tracking, Karaoke.
@@ -121,7 +122,7 @@ def prepare_render_job(
     # 2. Dateinamen & Titel
     title_text = titleize_label(h.label, 50, 3) if settings.overlay_title else None
     safe_title = re.sub(r"[^a-zA-Z0-9äöüÄÖÜß]+", "_", h.label).strip("_")[:60]
-    out_file = out_dir / f"{settings.prefix}{idx:02d}_{safe_title}.mp4"
+    out_file = out_dir / f"{prefix or settings.prefix}{idx:02d}_{safe_title}.mp4"
 
     # 3. Karaoke-Generierung
     ass_file = None
@@ -190,7 +191,12 @@ def prepare_render_job(
             )
             
             # 2.5 Lückenlose Interpolation für FFmpeg (verhindert Mikroruckler)
-            track = tracker.interpolate_track_to_fps(track, target_fps=30.0)
+            track = tracker.interpolate_track_to_fps(track, target_fps=5.0)
+
+            # 2.6 Keyframe-Reduktion direkt nach dem Smoothing/Interpolieren,
+            # damit der FFmpeg-Crop-Filtergraph nicht unnötig lang wird.
+            if settings.face_keys > 0:
+                track = tracker.reduce_keyframes(track, max_keys=settings.face_keys)
 
         # Filter-Generierung
         if start_center:
@@ -247,13 +253,14 @@ def prepare_render_job(
 
 def run_smart_pipeline(
     video_path: Path,
-    spans_json: Path,
+    spans_json: Optional[Path] = None,
     srt_input: Optional[Path] = None,
     out_dir: Optional[Path] = None,
     transcription_json: Optional[Path] = None,
     music_dir: Optional[Path] = None,
     subtitles: Optional[Path] = None,
-    force_rebuild: bool = False
+    force_rebuild: bool = False,
+    prefix: Optional[str] = None,
 ):
     """
     Setup der Pipeline: Validierung, Highlight-Generierung, Instanziierung der Domänen.
@@ -309,7 +316,10 @@ def run_smart_pipeline(
         am.log_step("Transcription", "SKIPPED", details="Artifacts already exist")
 
     # Schritt 1: Highlights generieren (LLM)
-    final_spans_json = spans_json
+    if spans_json is None:
+        final_spans_json = am.get_path(f"{am.stem}_highlights.json")
+    else:
+        final_spans_json = Path(spans_json)
     if not final_spans_json.exists() or force_rebuild:
         logger.info(f"✨ Generiere Highlights aus {srt_input.name}...")
         t_start = time.time()
@@ -343,8 +353,9 @@ def run_smart_pipeline(
     src_w, src_h = probe_wh(video)
     target_w, target_h = 1080, 1920
 
-    # 3. Musik-Setup
-    music_file = get_random_music(music_dir) if music_dir else None
+    # 3. Musik-Setup (CLI overrides settings.music_dir if provided)
+    effective_music_dir = music_dir or settings.music_dir
+    music_file = get_random_music(effective_music_dir) if effective_music_dir else None
     if music_file:
         logger.info(f"🎵 Nutze Hintergrundmusik: {music_file.name}")
 
@@ -353,12 +364,30 @@ def run_smart_pipeline(
     tracker = FaceTracker()
     sub_processor = SubtitleProcessor()
 
-    # --- NEU: Smart Cut Fallback ---
+    # --- Smart Cut / prosodic fallback ---
     srt_items = sub_processor.load_srt_file(srt_input) if srt_input.exists() else []
+    words = (
+        sub_processor.load_words_from_json(transcription_json)
+        if transcription_json and transcription_json.exists()
+        else []
+    )
+
     for h in marks:
-        if h.end is None and srt_items:
-            logger.info(f"📍 Clip '{h.label}' hat keine Endzeit. Suche Smart Cut...")
-            h.end = sub_processor.find_smart_end(srt_items, h.start, min_dur=18.0, max_dur=settings.max_window)
+        needs_snap = h.end is None
+        if not needs_snap and words:
+            needs_snap = not any(abs(w.get("end", 0.0) - h.end) <= 0.3 for w in words)
+
+        if needs_snap:
+            if words:
+                logger.info(f"📍 Clip '{h.label}' Endzeit wird prosodisch bestimmt...")
+                h.end = sub_processor.find_prosodic_smart_end(
+                    words, h.start, min_dur=18.0, max_dur=settings.max_window
+                )
+            elif srt_items:
+                logger.info(f"📍 Clip '{h.label}' hat keine Endzeit. Suche Smart Cut...")
+                h.end = sub_processor.find_smart_end(
+                    srt_items, h.start, min_dur=18.0, max_dur=settings.max_window
+                )
     # -------------------------------
     
     # --- ARTIFACT MANAGER: Render Plan speichern ---
@@ -397,7 +426,8 @@ def run_smart_pipeline(
                 tracker=tracker,
                 sub_processor=sub_processor,
                 music_file=music_file,
-                subtitles_path=subtitles
+                subtitles_path=subtitles,
+                prefix=prefix,
             )
             render_jobs.append(job)
             
@@ -413,11 +443,77 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--video", required=True)
     p.add_argument("--spans_json")
+    p.add_argument("--spans_md")
+    p.add_argument("--srt_input")
     p.add_argument("--out_dir")
+    p.add_argument("--transcription_json")
+    p.add_argument("--music_dir")
+    p.add_argument("--subtitles")
+    p.add_argument("--prefix")
+    p.add_argument("--nvenc", action="store_true")
+    p.add_argument("--face-sample-rate", type=float)
+    p.add_argument("--face-min-conf", type=float)
+    p.add_argument("--face-smooth-sec", type=float)
+    p.add_argument("--face-keys", type=int)
+    p.add_argument("--face-first-range", type=float)
+    p.add_argument("--face-first-grid", type=float)
+    p.add_argument("--face-first-steps", type=int)
+    p.add_argument("--face-first-sample-rate", type=float)
     args = p.parse_args()
-    
+
     v_path = Path(args.video)
     o_dir = Path(args.out_dir) if args.out_dir else settings.out_dir
-    s_json = Path(args.spans_json) if args.spans_json else o_dir / "highlights.json"
-    
-    run_smart_pipeline(v_path, s_json, out_dir=o_dir)
+
+    if args.nvenc:
+        settings.nvenc = True
+    if args.prefix:
+        settings.prefix = args.prefix
+
+    face_overrides = {
+        "face_sample_rate": args.face_sample_rate,
+        "face_min_conf": args.face_min_conf,
+        "face_smooth_sec": args.face_smooth_sec,
+        "face_keys": args.face_keys,
+        "face_first_range": args.face_first_range,
+        "face_first_grid": args.face_first_grid,
+        "face_first_steps": args.face_first_steps,
+        "face_first_sample_rate": args.face_first_sample_rate,
+    }
+    for key, value in face_overrides.items():
+        if value is not None:
+            setattr(settings, key, value)
+
+    if args.spans_json:
+        s_json = Path(args.spans_json)
+    elif args.spans_md:
+        md_path = Path(args.spans_md)
+        s_json = md_path.with_suffix(".json")
+        if md_path.exists():
+            parser = HighlightParser()
+            marks = parser.load_highlights_from_md(md_path)
+            payload = {
+                "highlights": [
+                    {
+                        "title": h.label,
+                        "start": h.start,
+                        "end": h.end if h.end is not None else h.start + 60.0,
+                        "reason": "Markdown highlight",
+                    }
+                    for h in marks
+                ]
+            }
+            if payload["highlights"]:
+                save_json(s_json, payload)
+    else:
+        s_json = o_dir / f"{v_path.stem}_highlights.json"
+
+    run_smart_pipeline(
+        v_path,
+        s_json,
+        srt_input=Path(args.srt_input) if args.srt_input else None,
+        out_dir=o_dir,
+        transcription_json=Path(args.transcription_json) if args.transcription_json else None,
+        music_dir=Path(args.music_dir) if args.music_dir else None,
+        subtitles=Path(args.subtitles) if args.subtitles else None,
+        prefix=args.prefix,
+    )

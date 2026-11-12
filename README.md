@@ -1,100 +1,117 @@
-# 🎬 WhisperX Reel Pipeline v2.2
+# PythonReels – WhisperX Reel Pipeline
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-BSD--2--Clause-orange.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-Passing-brightgreen.svg)](tests/)
+Kompakte technische Dokumentation für die aktive Pipeline. Sie erzeugt aus langen Videos bzw. Predigten 9:16-Reels mit Karaoke-Untertiteln, Face-Tracking und EBU-R128-Audio-Normalisierung.
 
-Eine hochautomatisierte Pipeline zur Erstellung von viralen Social Media Reels (TikTok, Instagram, YouTube Shorts) aus langen Videoaufnahmen. Basierend auf **WhisperX** für präzise Transkription und **MediaPipe** für autonomes Bildausschnitt-Tracking.
+## Architektur
 
----
+- `batch_reels.py` – Orchestrator für Batch-Verarbeitung: Transkription, Summarizer, Highlight-Spans, Rendering.
+- `srt_summarizer_local.py` – Erzeugt `summary.md`, `highlights_longlist.md`, `highlights.md` und `highlights.json`; optional gefilterte Sermon-SRT über `--export-sermon-srt`.
+- `build_highlight_spans.py` – Berechnet Schnittfenster (`highlight_spans.md`, `reel_spans.json`) sowie virale Titel und Social-Media-Captions (`reels_content.md`).
+- `video_highlight_pipeline_smart.py` – Aktive Rendering-Pipeline für 9:16-Reels, Karaoke-ASS-Untertitel, Face-Tracking und FFmpeg-Audio-Mixing.
+- `core/config.py` – Zentrale Settings- und YAML-Ladelogik (`load_yaml_defaults()`).
+- `core/llm_client.py` – Zentrale LLM-Anbindung (`UnifiedLLM`) mit Provider-/Fallback-Logik.
+- `core/prompts.py` – Provider-spezifische MAP/REDUCE/CHUNK/MERGE-Prompts.
+- `domains/` – Fachlogik: `transcription/`, `highlights/`, `video/`, `vision/`, `llm/`.
 
-## 🚀 Kern-Features
+`main.py` ist ein optionaler Einzelvideo-CLI-Entrypoint und wird von `pyproject.toml` als `pythonreels`-Konsolenkommando referenziert.
 
-- **⚡ High-Speed Transkription**: Nutzt WhisperX (faster-whisper Backend) für 70x Echtzeit-Geschwindigkeit mit Wort-genauen Timestamps.
-- **🤖 KI-Highlight Scouting**: Autonome Extraktion der besten Momente via LLM (Ollama lokal oder Gemini API).
-- **🎯 Smart Face-Tracking**: Automatischer Crop von 16:9 auf 9:16 durch intelligentes MediaPipe-Tracking (Gesichts- und Posenerkennung).
-- **🎶 Dynamic Audio Ducking**: Automatisches Absenken der Hintergrundmusik während gesprochen wird.
-- **🎨 Karaoke-Subtitles**: Generierung von animierten ASS-Untertiteln für maximale Retention.
-
----
-
-## 📂 Projektstruktur
-
-Das Projekt folgt einer modularen **Domain-Driven-Structure**:
+## Ordnerstruktur
 
 ```text
-├── core/               # Infrastruktur, Config & Shared Utils
-├── domains/            # Fachlogik (Transcription, Video, Vision, LLM)
-├── tests/              # Umfassende Unit- & Smoke-Tests
-├── batch_reels.py      # Manager für Massenverarbeitung
-├── run_reel.sh         # Einfacher Einstiegspunkt für Einzelvideos
-└── smart_pipeline.py   # Kern-Logik für autonomes Rendering
+core/          # Config, LLM-Client, Prompts, Commands, Artifacts, Zeit-Utils
+domains/       # Transcription, Highlights, Video, Vision, LLM
+tests/         # Unit- und Smoke-Tests
+input/         # Quellvideos / SRT-Dateien
+raw_videos/    # Batch-Input-Fallback
+out_srt/       # exportierte / gefilterte SRT-Dateien
+out_summ/      # summary, highlights, spans
+out_reels/     # finale Reels
+out_clips/     # alternative Clip-Ausgabe
+music/         # Hintergrundmusik
+config.yaml    # aktive Konfiguration
+example.env    # Beispiel für Umgebungsvariablen
+old_files/     # Altlasten, für Refactorings ignorieren
 ```
 
----
+## Umgebungsvariablen
 
-## 🛠 Setup & Installation
+API-Keys werden primär aus der Umgebung gelesen. Leere YAML-Keys in `config.yaml` überschreiben gesetzte Umgebungsvariablen nicht.
 
-Das Projekt nutzt [uv](https://docs.astral.sh/uv/) für ein blitzschnelles Abhängigkeitsmanagement.
-
-### 1. Repository klonen
 ```bash
-git clone <dein-repo-url>
-cd whisperXBuild
+export OPENAI_API_KEY=...
+export OPENROUTER_API_KEY=...
+export GEMINI_API_KEY=...
 ```
 
-### 2. Umgebung einrichten
+Weitere wichtige Variablen:
+
+- `LLM_PROVIDER` – `openai`, `openrouter`, `gemini-api`/`gemini`, `ollama`, `llama-server`
+- `LLM_MODEL` – allgemeiner Modellname
+- provider-spezifisch: `OPENAI_MODEL`, `OPENROUTER_MODEL`, `GEMINI_MODEL`, `OLLAMA_MODEL`, `LLAMA_SERVER_MODEL`
+- `OPENAI_BASE_URL` – OpenAI-kompatibler Endpoint (z. B. OpenRouter oder lokaler llama-server)
+- `WHISPER_MODEL`, `WHISPER_DEVICE`, `WHISPER_LANGUAGE`, `WHISPER_COMPUTE_TYPE`
+- `FFMPEG_CRF`, `FFMPEG_PRESET`, `FFMPEG_AUDIO_BITRATE`
+- `FACE_TRACK`, `FACE_KEYS`, `FACE_SAMPLE_RATE`
+
+## Nutzung
+
+Batch-Verarbeitung:
+
 ```bash
-uv sync --all-extras
+.venv/bin/python batch_reels.py --input_dir input --out_root .
 ```
 
-### 3. Konfiguration
-Erstelle eine `.env` Datei basierend auf der `.env.example`:
-```bash
-cp .env.example .env
-# Trage hier deinen GEMINI_API_KEY ein (optional)
-```
+Einzelvideo:
 
----
-
-## 📋 Nutzung
-
-### Einzelnes Video verarbeiten
 ```bash
 ./run_reel.sh input/mein_video.mp4
 ```
 
-### Batch-Verarbeitung (Massen-Highlights)
+oder:
+
 ```bash
-uv run batch_reels.py --video input/predigt.mp4
+.venv/bin/python main.py --video input/mein_video.mp4
 ```
 
-### Intelligentes Highlight-Rendering
-Die Pipeline analysiert das Video, findet Highlights, generiert Titel & Captions und rendert die finalen Clips mit automatischem Fokus auf den Sprecher.
+Summarizer direkt:
 
----
-
-## ⚙️ Konfiguration
-
-Alle Parameter können in der `.env` oder direkt in der `core/config.py` angepasst werden:
-- `FFMPEG_CRF`: Videoqualität (18-28 empfohlen).
-- `LLM_PROVIDER`: `ollama` (lokal) oder `gemini` (Cloud).
-- `FACE_TRACK`: Aktiviert/Deaktiviert das autonome Tracking.
-
----
-
-## 🧪 Qualitätssicherung
-
-Die Pipeline ist durch automatisierte Tests abgesichert:
 ```bash
-uv run pytest
+.venv/bin/python srt_summarizer_local.py \
+  --srt input/mein_video.srt \
+  --out_dir out_summ \
+  --max-highlights 8 \
+  --llm-provider openai \
+  --model ds41 \
+  --export-sermon-srt out_srt/mein_video_predigt.srt
 ```
 
----
+Spans und Titel:
 
-## 📄 Lizenz
+```bash
+.venv/bin/python build_highlight_spans.py \
+  --highlights out_summ/highlights.json \
+  --srt input/mein_video.srt \
+  --out-md out_summ/highlight_spans.md \
+  --out-json out_summ/reel_spans.json
+```
 
-Dieses Projekt ist unter der **BSD-2-Clause Lizenz** lizenziert - siehe [LICENSE](LICENSE) für Details.
+Rendering:
 
----
-*Entwickelt für effizientes Content-Repurposing von Predigten, Vorträgen und Podcasts.*
+```bash
+.venv/bin/python video_highlight_pipeline_smart.py \
+  --video input/mein_video.mp4 \
+  --spans_json out_summ/reel_spans.json \
+  --out_dir out_reels
+```
+
+## Tests
+
+```bash
+OPENAI_API_KEY=testenv .venv/bin/python -m pytest -q
+```
+
+Die Pipeline verwendet EBU-R128-nahe Audio-Normalisierung (`-14 LUFS`, True-Peak `-1.0 dB`) und reduziert Face-Tracking-Keyframes, um überlange FFmpeg-Filtergraphen zu vermeiden.
+
+## Lizenz
+
+BSD-2-Clause – siehe `LICENSE`.

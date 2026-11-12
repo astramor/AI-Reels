@@ -85,6 +85,68 @@ SUMMARY_MERGE_PROMPT = """Führe diese Teil-Zusammenfassungen zu einer hochwerti
 Gliedere den Text in sinnvolle, thematische Absätze.
 Textteile:\n{parts}"""
 
+# Provider-specific legacy prompts used by srt_summarizer_local.py.
+# Cloud providers (OpenRouter/OpenAI/DeepSeek/Gemini) use the creative Gemini
+# variants; local Ollama keeps the strict structured variants.
+OLLAMA_PROMPT_MAP = """Aufgabe: Du bist Content-Scout. Finde prägnante, tiefgründige oder humorvolle Zitate, die viral gehen könnten.
+Regeln:
+1. EXAKTES Format: `- [HH:MM:SS] Das Zitat`
+2. STRIKT: Schreibe absolut keinen Einleitungstext und kein Fazit. Gib nur die Liste zurück.
+3. Behalte die originalen Zeitstempel zwingend exakt bei.
+TEXT:
+{block}"""
+
+OLLAMA_PROMPT_REDUCE = """Wähle die absoluten Top {n} Highlights aus der folgenden Liste.
+Achte auf Abwechslung (Humor vs. Tiefe).
+Regeln:
+1. EXAKTES Format: `- [HH:MM:SS] Text`
+2. STRIKT: Schreibe NIEMALS einen Einleitungssatz (wie "Hier sind die Highlights:"). Gib NUR die Markdown-Liste zurück.
+INPUT:
+{longlist}"""
+
+OLLAMA_PROMPT_CHUNK = """Fasse den folgenden Textabschnitt sachlich auf Deutsch zusammen.
+Regeln:
+1. Nutze ausschließlich Bulletpoints (- Punkt 1).
+2. Keine langen Schachtelsätze, sei präzise.
+3. Kein einleitender Text oder Erklärungen, beginne direkt mit dem ersten Bulletpoint.
+Abschnitt:
+{chunk}"""
+
+OLLAMA_PROMPT_MERGE = """Erstelle aus den folgenden Teil-Zusammenfassungen eine strukturierte Gesamt-Übersicht auf Deutsch.
+Halte dich STRIKT an diese Struktur, ohne zusätzliche Konversation oder Einleitung:
+
+1. Kernaussage (1 Satz)
+2. Hauptpunkte (Bulletpoints)
+3. Wichtigstes Takeaway (1 kurzer Satz)
+
+Textteile:
+{parts}"""
+
+GEMINI_PROMPT_MAP = """Du bist ein erfahrener Redakteur. Lies dieses Predigt-Transkript.
+Aufgabe: Extrahiere extrem starke, tiefgründige oder humorvolle "Viral Quotes" für Reels.
+REGELN:
+1. Die Sätze müssen komplett für sich alleine stehen können.
+2. Entferne Füllwörter am Satzanfang (Und, Aber, Denn).
+Format: `- [HH:MM:SS] Das Zitat`
+TEXT:
+{block}"""
+
+GEMINI_PROMPT_REDUCE = """Hier ist eine Liste gesammelter Zitate.
+Wähle EXAKT die {n} besten Highlights aus. Achte auf eine gute Mischung aus Inspiration und Alltagsrelevanz.
+Format: `- [HH:MM:SS] Zitat`
+INPUT:
+{longlist}"""
+
+GEMINI_PROMPT_CHUNK = """Fasse diesen Textabschnitt präzise und elegant zusammen.
+Schreibe einen fließenden, gut lesbaren Text (keine stumpfen Bulletpoints), der den gedanklichen Bogen des Sprechers gut einfängt.
+Abschnitt:
+{chunk}"""
+
+GEMINI_PROMPT_MERGE = """Führe diese Teil-Zusammenfassungen zu einer hochwertigen, zusammenhängenden Predigt-Zusammenfassung zusammen.
+Gliedere den Text in sinnvolle, thematische Absätze und schreibe auf hohem sprachlichen Niveau. Keine Aufzählungszeichen, sondern schöner Fließtext.
+Textteile:
+{parts}"""
+
 # ==============================================================================
 # 2. TITLE GENERATION (build_highlight_spans)
 # ==============================================================================

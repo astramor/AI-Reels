@@ -8,8 +8,8 @@ MOCK_ENCODERS_NVENC = """
 Encoders:
  V..... = Video
  ------
- V..... h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
- V..... hevc_nvenc           NVIDIA NVENC hevc encoder (codec hevc)
+ V....D h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
+ V....D hevc_nvenc           NVIDIA NVENC hevc encoder (codec hevc)
  A..... aac                  AAC (Advanced Audio Coding)
 """
 

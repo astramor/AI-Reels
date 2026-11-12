@@ -15,6 +15,15 @@ from core.config import settings
 from core.time_utils import seconds_to_hms_ms
 from core.commands import run_command
 
+# EBU R128 broadcast-style speech chain. Applied to both the music and
+# no-music branches so every rendered clip targets -14 LUFS.
+EBU_R128_AUDIO_FILTER_CHAIN = (
+    "highpass=f=80,"
+    "afftdn=nf=-25,"
+    "acompressor=threshold=-18dB:ratio=3:attack=15:release=150:makeup=2,"
+    "loudnorm=I=-14:TP=-1.0:LRA=9:print_format=summary"
+)
+
 
 class RenderError(Exception):
     """Basis-Exception für Rendering-Fehler."""
@@ -388,26 +397,27 @@ class FFmpegRenderer:
             st = max(0, duration - fade_sec)
             v_filters.append(f"fade=t=out:st={st:.3f}:d={fade_sec:.3f}")
 
-        # --- AUDIO FILTER CHAIN ---
-        af_filters = []
-        if loudnorm:
-            af_filters.append(
-                "volume=6.0,dynaudnorm=f=100:g=31:m=10,loudnorm=I=-9:TP=-0.1:LRA=5:print_format=summary"
-            )
+        # --- AUDIO FILTER CHAIN (EBU R128 / broadcast) ---
+        af_filters = [EBU_R128_AUDIO_FILTER_CHAIN]
 
         if music_file:
             # Voice + Music mixing logic
-            if af_filters:
-                voice_chain = "[0:a]" + ",".join(af_filters) + "[voice_norm];"
-            else:
-                # Verhindert FFmpeg Syntax-Error (No such filter: ''), wenn af_filters leer ist
-                voice_chain = "[0:a]anull[voice_norm];"
+            voice_chain = (
+                f"[0:a]{EBU_R128_AUDIO_FILTER_CHAIN}[voice_norm];"
+            )
 
-            music_chain = f"[1:a]volume={music_volume}[music_vol];"
-            music_chain += f"[music_vol][voice_norm]sidechaincompress=threshold={ducking_threshold}:ratio={ducking_ratio}:attack={ducking_attack}:release={ducking_release}[music_ducked];"
+            music_chain = (
+                f"[1:a]volume={music_volume},"
+                "equalizer=f=1500:t=q:w=1.5:g=-4[music_eq];"
+                f"[music_eq][voice_norm]sidechaincompress="
+                f"threshold={ducking_threshold}:ratio={ducking_ratio}:"
+                f"attack={ducking_attack}:release={ducking_release}:makeup=1.0[music_ducked];"
+            )
 
-            mix_chain = "[voice_norm][music_ducked]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1:normalize=0[summed];"
-            mix_chain += "[summed]alimiter=limit=-0.1dB:level_in=1.0:level_out=1.0:asc=1[a_pre_fade]"
+            mix_chain = (
+                "[voice_norm][music_ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[summed];"
+                "[summed]alimiter=limit=-1.0dB:level=disabled:asc=1[a_pre_fade]"
+            )
             
             a_fades = []
             if fade_in and fade_in_sec > 0:
@@ -446,14 +456,15 @@ class FFmpegRenderer:
         cmd += ["-c:v", video_codec]
         if "nvenc" in video_codec:
             cmd += [
-                "-rc",
-                "vbr",
-                "-cq",
-                str(crf),
-                "-preset",
-                "p7",
-                "-pix_fmt",
-                "yuv420p",
+                "-rc", "vbr",
+                "-cq", str(crf),
+                "-preset", "p7",
+                "-tune", "hq",
+                "-rc-lookahead", "20",
+                "-spatial-aq", "1",
+                "-temporal-aq", "1",
+                "-aq-strength", "8",
+                "-pix_fmt", "yuv420p",
             ]
         else:
             cmd += ["-crf", str(crf), "-preset", preset]

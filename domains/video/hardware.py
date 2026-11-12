@@ -24,9 +24,10 @@ def detect_available_nvenc_codecs() -> List[str]:
         # Log complete output only on DEBUG level
         logger.debug(f"FFmpeg encoders output:\n{result.stdout}")
         
-        # Regex to find video encoders (starting with V) that contain 'nvenc'
-        # Format: V..... h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
-        nvenc_pattern = re.compile(r"^\s*V\.\.\.\.\.\s+(\S*nvenc\S*)", re.MULTILINE)
+        # Regex to find video encoders (starting with V) that contain 'nvenc'.
+        # Modern FFmpeg capability flags can contain letters such as D:
+        # Format: V....D h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
+        nvenc_pattern = re.compile(r"^\s*V\S*\s+(\S*nvenc\S*)", re.MULTILINE)
         codecs = nvenc_pattern.findall(result.stdout)
         
         logger.info(f"Detected NVENC codecs: {', '.join(codecs) if codecs else 'None'}")

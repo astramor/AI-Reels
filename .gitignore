@@ -131,6 +131,9 @@ celerybeat.pid
 backup_ass/
 old_files/
 
+# Temporary debug outputs
+debug_ffmpeg_cmd.txt
+
 # Project Outputs & Data
 raw_videos/
 out/
@@ -152,6 +155,7 @@ input/
 *.md
 !README.md
 !CONVENTIONS.md
+!AGENTS.md
 !besuchen.md
 !projekt_dokumentation.md
 !EXAMPLES.md

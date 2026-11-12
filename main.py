@@ -139,7 +139,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.warning("NVENC 'h264_nvenc' nicht verfügbar. Automatischer Fallback auf CPU (libx265).")
 
     out_dir = Path(args.out_dir)
-    spans_json = Path(args.spans_json) if args.spans_json else out_dir / "highlights.json"
+    spans_json = Path(args.spans_json) if args.spans_json else out_dir / f"{video_path.stem}_highlights.json"
     
     # Dry Run Logik
     if args.dry_run:

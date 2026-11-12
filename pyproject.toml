@@ -19,6 +19,7 @@ dependencies = [
     "opencv-python>=4.13.0.92",
     "scipy>=1.15.3",
     "numpy>=2.2.6",
+    "openai>=3.49.0",
 ]
 
 [project.scripts]

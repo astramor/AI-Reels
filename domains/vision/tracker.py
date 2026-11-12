@@ -314,6 +314,14 @@ class FaceTracker:
         return [(float(t), float(x), float(y)) for t, x, y in zip(new_times, new_xs, new_ys)]
 
     def reduce_keyframes(self, track: List[Tuple[float, float, float]], max_keys: int = 40) -> List[Tuple[float, float, float]]:
-        """Erhöht die Keyframe-Dichte für weichere FFmpeg-Interpolation."""
-        if not track or len(track) <= max_keys: return track
-        return [track[round(i * (len(track)-1) / (max_keys-1))] for i in range(max_keys)]
+        """Reduziert die Keyframe-Dichte für kürzere FFmpeg-Filtergraphen."""
+        if not track or max_keys <= 0:
+            return track
+        if max_keys == 1:
+            return [track[0]]
+        if len(track) <= max_keys:
+            return track
+        return [
+            track[round(i * (len(track) - 1) / (max_keys - 1))]
+            for i in range(max_keys)
+        ]

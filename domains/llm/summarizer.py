@@ -4,7 +4,6 @@
 import json
 import pathlib
 import re
-import time
 from typing import List, Tuple, Generator, Dict
 
 import srt
@@ -17,71 +16,42 @@ from core.prompts import (
     SUMMARY_CHUNK_PROMPT,
     SUMMARY_MERGE_PROMPT
 )
+from core.llm_client import UnifiedLLM, clean_thinking
 from domains.llm.errors import LLMApiError, LLMInvalidJsonError
 from domains.highlights.errors import HighlightValidationError, EmptyTranscriptError
 from domains.highlights.models import HighlightPayload
-
-try:
-    from ollama import Client as OllamaClient
-except ImportError:
-    OllamaClient = None
-
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    genai = None
 
 
 class SermonSummarizer:
     """
     Klasse zur Zusammenfassung von Videos und Extraktion von Highlights mittels LLMs.
-    Unterstützt Ollama und Gemini. Nutzt ein robustes Zwei-Stufen-Verfahren (Scouting & Curation).
+    Unterstützt Ollama, Gemini und OpenAI-kompatible Provider (OpenRouter, llama-server usw.).
+    Nutzt ein robustes Zwei-Stufen-Verfahren (Scouting & Curation).
     """
 
     def __init__(self, settings):
         self.settings = settings
         self.provider = settings.llm_provider.lower()
-        self.is_gemini = (self.provider == "gemini")
-        
-        if self.is_gemini:
-            self.model_name = settings.gemini_model
-            if not genai:
-                raise ImportError("Bitte `pip install google-genai` für Gemini-Support.")
-            api_key = settings.gemini_api_key.get_secret_value() if settings.gemini_api_key else ""
-            self.client = genai.Client(api_key=api_key)
-            logger.info(f"Gemini Mode: {self.model_name}")
-        else:
-            self.model_name = settings.llm_model
-            if not OllamaClient:
-                raise ImportError("Bitte `pip install ollama` für Ollama-Support.")
-            self.client = OllamaClient(host="http://127.0.0.1:11434")
-            logger.info(f"Ollama Mode: {self.model_name}")
+        self.is_gemini = self.provider in ("gemini", "gemini-api")
+        self.is_openai = self.provider in ("openai", "openrouter", "llama-server")
 
-    def _get_highlight_schema(self) -> types.Schema:
-        """Definiert die exakte JSON-Struktur für Gemini (Structured Outputs)."""
-        return types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "highlights": types.Schema(
-                    type=types.Type.ARRAY,
-                    description="Eine Liste der besten Video-Highlights.",
-                    items=types.Schema(
-                        type=types.Type.OBJECT,
-                        properties={
-                            "title": types.Schema(type=types.Type.STRING, description="Kurzer, packender Titel"),
-                            "start": types.Schema(type=types.Type.NUMBER, description="Startzeit in Sekunden"),
-                            "end": types.Schema(type=types.Type.NUMBER, description="Endzeit in Sekunden"),
-                            "reason": types.Schema(type=types.Type.STRING, description="Warum dieser Clip stark ist"),
-                            "hook": types.Schema(type=types.Type.STRING, description="Bereinigter erster Satz"),
-                            "confidence": types.Schema(type=types.Type.NUMBER, description="Confidence (0.0-1.0)")
-                        },
-                        required=["title", "start", "end", "reason"]
-                    )
-                )
-            },
-            required=["highlights"]
-        )
+        config = {
+            "llm_provider": self.provider,
+            "llm_model": settings.llm_model,
+            "gemini_model": settings.gemini_model,
+            "openrouter_model": settings.openrouter_model,
+            "openai_model": settings.openai_model,
+            "ollama_model": settings.ollama_model,
+            "llama_server_model": settings.llama_server_model,
+            "gemini_api_key": settings.gemini_api_key.get_secret_value() if settings.gemini_api_key else "",
+            "openai_api_key": settings.openai_api_key,
+            "openai_base_url": settings.openai_base_url,
+        }
+        self.llm = UnifiedLLM(config)
+        self.model_name = self.llm.gemini_model if self.is_gemini else self.llm.model
+        logger.info(f"LLM Mode: {self.llm.provider} / {self.model_name}")
+
+
 
     def extract_json_from_llm_response(self, raw_text: str) -> dict:
         """Extrahiert JSON aus potenziell unsauberem LLM-Output."""
@@ -112,85 +82,19 @@ class SermonSummarizer:
 
     def chat_json(self, sys_p: str, user_p: str, temp: float = 0.2) -> str:
         """Sendet einen Request an das LLM mit Anweisung für JSON-Ausgabe."""
-        if self.is_gemini:
-            try:
-                time.sleep(1)
-                res = self.client.models.generate_content(
-                    model=self.model_name,
-                    contents=user_p,
-                    config=types.GenerateContentConfig(
-                        system_instruction=sys_p,
-                        temperature=temp,
-                        response_mime_type="application/json",
-                        response_schema=self._get_highlight_schema(),
-                    ),
-                )
-                return res.text
-            except Exception as e:
-                raise LLMApiError(f"Gemini API Fehler: {e}")
-        else:
-            try:
-                options = {
-                    "temperature": temp,
-                    "num_ctx": 16384,
-                    "num_predict": 2048
-                }
-                resp = self.client.chat(
-                    model=self.model_name,
-                    messages=[
-                        {"role": "system", "content": sys_p},
-                        {"role": "user", "content": user_p},
-                    ],
-                    options=options,
-                    format="json"
-                )
-                return resp["message"]["content"]
-            except Exception as e:
-                raise LLMApiError(f"Ollama API Fehler: {e}")
+        raw = self.llm.chat_json(sys_p, user_p, temp=temp)
+        if not raw:
+            raise LLMApiError("LLM-Ausgabe war leer.")
+        return raw
 
     def chat(self, sys_p: str, user_p: str, temp: float = 0.1) -> str:
         """Klassischer Text-Chat (für Summary)."""
-        if self.is_gemini:
-            try:
-                time.sleep(1)
-                res = self.client.models.generate_content(
-                    model=self.model_name,
-                    contents=user_p,
-                    config=types.GenerateContentConfig(
-                        system_instruction=sys_p, temperature=temp
-                    ),
-                )
-                return self._clean_thinking(res.text)
-            except Exception as e:
-                logger.error(f"Gemini Error: {e}")
-                return ""
-        else:
-            try:
-                resp = self.client.chat(
-                    model=self.model_name,
-                    messages=[
-                        {"role": "system", "content": sys_p},
-                        {"role": "user", "content": user_p},
-                    ],
-                    options={"temperature": temp, "num_ctx": 8192},
-                )
-                return self._clean_thinking(resp["message"]["content"])
-            except Exception as e:
-                logger.error(f"Ollama Error: {e}")
-                return ""
+        return self.llm.chat(sys_p, user_p, temp=temp)
 
-    def _clean_thinking(self, text: str) -> str:
-        if not text: return ""
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-        return re.sub(r"<think>.*", "", text, flags=re.DOTALL).strip()
+
 
     def unload(self):
-        if not self.is_gemini and self.client:
-            logger.info(f"Unloading model {self.model_name} from VRAM...")
-            try:
-                self.client.generate(model=self.model_name, keep_alive=0)
-            except Exception as e:
-                logger.warning(f"Modell-Entladen fehlgeschlagen: {e}")
+        self.llm.unload()
 
     def _srt_items(self, srt_path: pathlib.Path) -> Generator[Tuple[srt.Subtitle, str], None, None]:
         for it in srt.parse(srt_path.read_text(encoding="utf-8")):
@@ -215,7 +119,7 @@ class SermonSummarizer:
         (out_dir / "transcript_predigt.txt").write_text(transcript_for_json, encoding="utf-8")
 
         # 1. Summary erstellen
-        c_size = 40000 if self.is_gemini else 6000
+        c_size = 40000 if self.llm.is_cloud_llm else 6000
         chunks = [transcript_for_json[i : i + c_size] for i in range(0, len(transcript_for_json), c_size)]
         parts = []
         logger.info(f"--- Summary ({len(chunks)} Chunks) ---")
@@ -231,8 +135,8 @@ class SermonSummarizer:
         logger.info("--- Highlights Scouting (Stage 1: Candidates) ---")
         longlist_candidates = []
         
-        # Wir nutzen kleinere Chunks fürs Scouting, um nichts zu übersehen (ca. 8000 Zeichen)
-        scout_chunks = [transcript_for_json[i : i + 8000] for i in range(0, len(transcript_for_json), 8000)]
+        # Cloud-Provider erhalten große Chunks (40000), Ollama kleinere (6000).
+        scout_chunks = [transcript_for_json[i : i + c_size] for i in range(0, len(transcript_for_json), c_size)]
         
         for i, chunk in enumerate(scout_chunks):
             logger.info(f"Scout Chunk {i + 1}/{len(scout_chunks)}...")

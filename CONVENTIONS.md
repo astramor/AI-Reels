@@ -1,5 +1,5 @@
 # .aider.conf.yml
-model: ollama/gemma-4:26b
+#model: ollama/gemma-4:26b
 
 # Der Auto-Korrektur Loop mit Ruff
 auto-lint: true

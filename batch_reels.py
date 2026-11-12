@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
 import srt
 from core.time_utils import hms_to_seconds, parse_time_to_seconds, seconds_to_hms
-from core.config import settings
+from core.config import settings, SETTINGS_ALIASES
 from domains.highlights.parser import HighlightParser
 from domains.video.renderer import gpu_semaphore
 from core.commands import run_command, ProcessRegistry
@@ -76,6 +76,32 @@ def parse_highlights_md(md_path: Path):
             "start": h.start,
             "end": h.end if h.end is not None else (h.start + 60),
             "title": h.label
+        })
+    return spans
+
+
+def parse_spans_json(json_path: Path):
+    """Parse reel_spans.json (or a HighlightPayload) into numeric spans."""
+    if not json_path.exists():
+        return []
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning(f"Fehler beim Parsen der Spans-JSON: {e}")
+        return []
+
+    items = data.get("highlights", data) if isinstance(data, dict) else data
+    spans = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        start_val = item.get("start", 0.0)
+        end_val = item.get("end", parse_time_to_seconds(start_val) + 60.0)
+        spans.append({
+            "start": parse_time_to_seconds(start_val),
+            "end": parse_time_to_seconds(end_val),
+            "title": item.get("title", "Highlight"),
         })
     return spans
 
@@ -174,7 +200,7 @@ def find_whisper_srt(out_dir: Path, stem: str) -> Path:
 
 def render_clip(item, vid, reels_out, summ_dir, stem, args):
     """
-    Rendert einen einzelnen Clip asynchron.
+    Rendert einen einzelnen Clip asynchron über die Smart-Pipeline.
     """
     idx = item["idx"]
     current_start = item["start"]
@@ -182,98 +208,63 @@ def render_clip(item, vid, reels_out, summ_dir, stem, args):
     final_srt_arg = item.get("final_srt_arg")
     final_json_arg = item.get("final_json_arg")
 
-    tmp_span = summ_dir / f"tmp_span_{idx}.md"
+    tmp_span_json = summ_dir / f"tmp_span_{idx}.json"
     try:
-        tmp_span.write_text(
-            f"- [{seconds_to_hms(current_start)} -> {seconds_to_hms(current_end)}] {item['title']}",
+        payload = {
+            "highlights": [
+                {
+                    "title": item["title"],
+                    "start": current_start,
+                    "end": current_end,
+                    "reason": item.get("reason", "Batch clip"),
+                }
+            ]
+        }
+        tmp_span_json.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
 
         cmd = [
             sys.executable,
-            "video_highlight_pipeline.py",
+            "video_highlight_pipeline_smart.py",
             "--video",
             str(vid),
-            "--spans_md",
-            str(tmp_span),
+            "--spans_json",
+            str(tmp_span_json),
             "--out_dir",
             str(reels_out),
             "--prefix",
             f"{stem}_{idx:02d}_",
-            "--subtitles",
-            final_srt_arg,
-            "--transcription_json",
-            final_json_arg,
-            "--preroll",
-            str(args.preroll),
-            "--postroll",
-            str(args.postroll),
-            "--max-window",
-            str(args.max_window),
-            "--srt-min-first",
-            str(args.srt_min_first),
-            "--crf",
-            str(args.crf),
-            "--preset",
-            args.preset,
-            "--audio-bitrate",
-            args.audio_bitrate,
         ]
 
-        if args.reel:
-            cmd.append("--reel")
-        if args.loudnorm:
-            cmd.append("--loudnorm")
-        if args.fade_in:
-            cmd += ["--fade-in", "--fade-in-sec", str(args.fade_in_sec)]
-        if args.fade_out:
-            cmd += ["--fade-out", "--fade-sec", str(args.fade_sec)]
-        if args.overlay_title:
-            cmd += [
-                "--overlay-title",
-                "--overlay-fontsize",
-                str(args.overlay_fontsize),
-                "--overlay-margin-top",
-                str(args.overlay_margin_top),
-            ]
-        if args.export_srt:
-            cmd.append("--export-srt")
-        if args.reencode:
-            cmd.append("--reencode")
+        if final_srt_arg:
+            cmd += ["--srt_input", str(final_srt_arg), "--subtitles", str(final_srt_arg)]
+        if final_json_arg:
+            cmd += ["--transcription_json", str(final_json_arg)]
+        if args.music_dir:
+            cmd += ["--music_dir", str(args.music_dir)]
         if args.nvenc:
             cmd.append("--nvenc")
-        if args.blur_bg:
-            cmd.append("--blur-bg")
-        if args.color_grade:
-            cmd.append("--color-grade")
-        if args.music_dir:
-            cmd += ["--music-dir", str(args.music_dir)]
-        if args.music_volume is not None:
-            cmd += ["--music-volume", str(args.music_volume)]
 
         cmd += [
-            "--ducking-threshold",
-            str(args.ducking_threshold),
-            "--ducking-ratio",
-            str(args.ducking_ratio),
-            "--ducking-attack",
-            str(args.ducking_attack),
-            "--ducking-release",
-            str(args.ducking_release),
+            "--face-sample-rate",
+            str(args.face_sample_rate),
+            "--face-min-conf",
+            str(args.face_min_conf),
+            "--face-smooth-sec",
+            str(args.face_smooth_sec),
+            "--face-keys",
+            str(args.face_keys),
+            "--face-first-range",
+            str(args.face_first_range),
+            "--face-first-grid",
+            str(args.face_first_grid),
+            "--face-first-steps",
+            str(args.face_first_steps),
+            "--face-first-sample-rate",
+            str(args.face_first_sample_rate),
         ]
-
-        if args.face_detect_on_start:
-            cmd.append("--face-detect-on-start")
-        if args.face_first_robust:
-            cmd.append("--face-first-robust")
-        if args.face_track:
-            cmd.append("--face-track")
-        if args.face_center:
-            cmd.append("--face-center")
-        if args.face_use_pose_fallback:
-            cmd.append("--face-use-pose-fallback")
-        if args.fallback_third and args.fallback_third != "none":
-            cmd += ["--fallback-third", args.fallback_third]
 
         logger.info(f"🎬 Starte Rendering für Clip {idx}: {item['title']}")
         run(cmd, dry_run=args.dry_run)
@@ -281,8 +272,8 @@ def render_clip(item, vid, reels_out, summ_dir, stem, args):
     except Exception as e:
         logger.info(f"❌ Fehler beim Rendern von Clip {idx}: {e}")
     finally:
-        if tmp_span.exists():
-            tmp_span.unlink()
+        if tmp_span_json.exists():
+            tmp_span_json.unlink()
 
 
 def process_pre_cuts(
@@ -311,7 +302,8 @@ def process_pre_cuts(
             end_str = entry.get("end", None)
             if not end_str:
                 continue
-            target_file = input_dir / vid.name
+            # Audio-only WAV extraction avoids keyframe/stream-copy timestamp drift.
+            target_file = input_dir / f"{vid.stem}.wav"
             if target_file.exists() and not force:
                 continue
             s_sec = parse_time_to_seconds(start_str)
@@ -322,21 +314,10 @@ def process_pre_cuts(
             logger.info(f"✂️  Schneide Predigt: {stem} (Start: {start_str}, Dauer: {duration}s)")
 
             cmd = [
-                "ffmpeg",
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-ss",
-                str(start_str),
-                "-i",
-                str(vid),
-                "-t",
-                str(duration),
-                "-c",
-                "copy",
-                "-map",
-                "0",
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-ss", str(start_str), "-to", str(end_str), "-i", str(vid),
+                "-vn", "-af", "highpass=f=80,lowpass=f=8000",
+                "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
                 str(target_file),
             ]
             run(cmd)
@@ -508,12 +489,31 @@ def execute_summarizer(srt_file, summ_dir, predigt_srt, defaults, args):
             "--min-sermon-minutes",
             str(args.min_sermon_minutes),
         ]
+    if args.llm_provider:
+        s_cmd += ["--llm-provider", args.llm_provider]
+
+    provider = (args.llm_provider or settings.llm_provider).lower()
+    if provider in ("gemini", "gemini-api") and args.gemini_model:
+        s_cmd += ["--model", args.gemini_model]
+    elif args.llm_model:
+        s_cmd += ["--model", args.llm_model]
+
+    if args.sermon_start:
+        s_cmd += ["--sermon-start", args.sermon_start]
+    if args.sermon_end:
+        s_cmd += ["--sermon-end", args.sermon_end]
+
+    if args.max_highlights:
+        s_cmd += ["--max-highlights", str(args.max_highlights)]
+    if args.strict_snap_tol:
+        s_cmd += ["--strict-snap-tol", str(args.strict_snap_tol)]
+
     if "summarizer_preset" in defaults:
         s_cmd += ["--preset", defaults["summarizer_preset"]]
     run(s_cmd, dry_run=args.dry_run)
 
 
-def execute_span_builder(hl_md, predigt_srt, spans_md, spans_json, args):
+def execute_span_builder(hl_md, predigt_srt, spans_md, spans_json, args, transcription_json=None):
     logger.info("Berechne Spans & Titel...")
     b_cmd = [
         sys.executable,
@@ -528,6 +528,10 @@ def execute_span_builder(hl_md, predigt_srt, spans_md, spans_json, args):
         str(spans_json),
         "--target-count",
         str(args.target_count),
+        "--target-min",
+        str(args.span_min),
+        "--target-max",
+        str(args.span_max),
         "--title-min",
         str(args.title_min),
         "--title-max",
@@ -535,6 +539,8 @@ def execute_span_builder(hl_md, predigt_srt, spans_md, spans_json, args):
         "--gemini-model",
         args.gemini_model,
     ]
+    if transcription_json and Path(transcription_json).exists():
+        b_cmd += ["--transcription-json", str(transcription_json)]
     if args.llm_titles:
         b_cmd.append("--llm-titles")
     else:
@@ -544,8 +550,8 @@ def execute_span_builder(hl_md, predigt_srt, spans_md, spans_json, args):
     run(b_cmd, dry_run=args.dry_run)
 
 
-def execute_render_orchestration(vid, stem, summ_dir, json_file, predigt_srt, spans_md, out_reels, args):
-    spans_content = parse_highlights_md(spans_md)
+def execute_render_orchestration(vid, stem, summ_dir, json_file, predigt_srt, spans_json, out_reels, args):
+    spans_content = parse_spans_json(spans_json)
     reels_out = out_reels / stem
     reels_out.mkdir(parents=True, exist_ok=True)
 
@@ -645,6 +651,13 @@ def main():
     ap = setup_argparse(defaults)
     args = ap.parse_args()
 
+    # Sync explicit CLI overrides into the global Pydantic settings.
+    # Empty string defaults must not overwrite values loaded from config.yaml.
+    for key, value in vars(args).items():
+        target = SETTINGS_ALIASES.get(key, key)
+        if hasattr(settings, target) and value not in (None, ""):
+            setattr(settings, target, value)
+
     if not args.input_dir:
         print("❌ Fehler: 'input_dir' fehlt!")
         sys.exit(1)
@@ -701,7 +714,14 @@ def main():
 
         if args.build_spans:
             if not spans_json.exists() or args.force:
-                execute_span_builder(hl_json, predigt_srt, spans_md, spans_json, args)
+                execute_span_builder(
+                    hl_json,
+                    predigt_srt,
+                    spans_md,
+                    spans_json,
+                    args,
+                    transcription_json=json_file,
+                )
             else:
                 logger.info("ℹ️  Spans vorhanden.")
 
@@ -710,14 +730,6 @@ def main():
 
         if args.render and spans_json.exists():
             execute_render_orchestration(vid, stem, summ_dir, json_file, predigt_srt, spans_json, out_reels, args)
-
-    logger.info("Fertig.")
-
-
-if __name__ == "__main__":
-    main()
-
-          execute_render_orchestration(vid, stem, summ_dir, json_file, predigt_srt, spans_md, out_reels, args)
 
     logger.info("Fertig.")
 

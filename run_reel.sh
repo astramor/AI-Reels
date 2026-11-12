@@ -12,6 +12,7 @@ VIDEO_DIR=$(dirname "$FILE")
 VIDEO_NAME=$(basename "$FILE")
 BASENAME="${VIDEO_NAME%.*}"
 SRT_PATH="${VIDEO_DIR}/${BASENAME}.srt"
+JSON_PATH="${VIDEO_DIR}/${BASENAME}.json"
 OUT_DIR="out_clips"
 MD_PATH="${OUT_DIR}/${BASENAME}_highlights.md"
 
@@ -37,7 +38,7 @@ if [ ! -f "$SRT_PATH" ]; then
     $WHISPER_CMD "$FILE" \
         --model large-v3 \
         --language de \
-        --output_format srt \
+        --output_format all \
         --output_dir "$VIDEO_DIR" \
         --device cuda \
         --compute_type float16 \
@@ -67,6 +68,7 @@ fi
 $PYTHON_CMD video_highlight_pipeline_smart.py \
     --video "$FILE" \
     --srt_input "$SRT_PATH" \
+    --transcription_json "$JSON_PATH" \
     --spans_md "$MD_PATH" \
     --out_dir "$OUT_DIR"
 

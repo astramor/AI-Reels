@@ -179,3 +179,133 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if s_end > start_sec + max_dur:
                 return s_end
         return end_sec
+
+    def load_words_from_json(self, json_path: Path) -> List[dict]:
+        """Extract the flat word list from a WhisperX JSON file."""
+        if not json_path or not json_path.exists():
+            return []
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.warning(f"Warnung beim Laden der Wortliste: {e}")
+            return []
+
+        words = []
+        for seg in data.get("segments", []):
+            words.extend(seg.get("words", []))
+        if not words:
+            words = data.get("words", [])
+        words = [
+            w for w in words
+            if w.get("start") is not None and w.get("end") is not None
+        ]
+        words.sort(key=lambda w: float(w["start"]))
+        return words
+
+    def find_prosodic_smart_end(
+        self,
+        words: list[dict],
+        start_sec: float,
+        min_dur: float = 18.0,
+        max_dur: float = 55.0,
+        min_pause_sec: float = 0.35,
+    ) -> float:
+        """Find a sentence boundary using punctuation, pauses, and target clip length."""
+        if not words:
+            return start_sec + max_dur
+
+        forbidden_next = {"aber", "doch", "allerdings", "denn", "weil", "obwohl", "sondern", "und"}
+        best_end = None
+        best_score = -1.0
+
+        for i, w in enumerate(words):
+            w_end = w.get("end", 0.0)
+            dur = w_end - start_sec
+            if dur < min_dur:
+                continue
+            if dur > max_dur:
+                break
+
+            text = w.get("word", "").strip()
+            if not text.endswith((".", "!", "?")):
+                continue
+
+            next_word = words[i + 1] if i + 1 < len(words) else None
+            pause = (next_word["start"] - w_end) if next_word and "start" in next_word else 1.0
+            next_clean = next_word.get("word", "").strip().lower().strip(",.!?") if next_word else ""
+
+            if next_clean in forbidden_next:
+                continue
+
+            # Prefer longer pauses and target clip lengths around 30 seconds
+            pause_score = min(pause / min_pause_sec, 3.0)
+            length_penalty = abs(dur - 30.0) * 0.02
+            score = pause_score - length_penalty
+
+            if pause >= min_pause_sec and score > best_score:
+                best_score = score
+                best_end = w_end
+
+        return (best_end + 0.25) if best_end else min(start_sec + max_dur, words[-1].get("end", start_sec + max_dur))
+
+    def snap_end_to_speech_pause(
+        self,
+        words: List[dict],
+        chosen_end: float,
+        start_sec: float,
+        min_duration: float,
+        max_duration: float,
+        tolerance: float = 2.5,
+        min_pause_sec: float = 0.35,
+    ) -> float:
+        """Snap a chosen clip end to a nearby word end followed by a real speech pause."""
+        if not words:
+            return chosen_end
+
+        words = sorted(words, key=lambda w: float(w.get("start", 0.0) or 0.0))
+        effective_min = start_sec + min_duration
+        effective_max = start_sec + max_duration
+        search_min = max(effective_min, chosen_end - tolerance)
+        search_max = min(effective_max, chosen_end + tolerance)
+
+        candidates = []
+        for i, w in enumerate(words):
+            try:
+                w_end = float(w["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            if w_end < search_min or w_end > search_max:
+                continue
+
+            next_word = words[i + 1] if i + 1 < len(words) else None
+            if next_word is not None:
+                try:
+                    next_start = float(next_word["start"])
+                except (KeyError, TypeError, ValueError):
+                    next_start = w_end
+                pause = next_start - w_end
+            else:
+                pause = 1.0
+
+            if pause < min_pause_sec:
+                continue
+
+            word_text = str(w.get("word", "")).strip()
+            has_punctuation = word_text.endswith((".", "!", "?"))
+            distance = abs(w_end - chosen_end)
+
+            # Prefer punctuation, longer pauses, and closeness to the chosen end.
+            score = (
+                (1.0 if has_punctuation else 0.0)
+                + min(pause, 1.0)
+                - distance * 0.1
+            )
+            candidates.append((score, w_end))
+
+        if not candidates:
+            return chosen_end
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1] + 0.15

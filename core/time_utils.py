@@ -74,6 +74,16 @@ def hms_to_seconds(h: Union[str, int], m: Union[str, int], s: Union[str, int]) -
     return float(h) * 3600 + float(m) * 60 + float(s)
 
 
+def parse_hms_to_seconds(h: Union[str, int], m: Union[str, int], s: Union[str, int]) -> float:
+    """Float-safe alias for hms_to_seconds, preserving fractional seconds."""
+    return float(h) * 3600 + float(m) * 60 + float(s)
+
+
+def fix_hms_format(value: Union[str, int, float, timedelta, None]) -> str:
+    """Format a timestamp as HH:MM:SS.mmm without truncating fractional seconds."""
+    return seconds_to_hms_ms(parse_time_to_seconds(value))
+
+
 def normalize_hms(value: Union[str, int, float, timedelta, None]) -> str:
     """
     Normalisiert verschiedene Zeitformate (z.B. "1:2" -> "00:01:02") in HH:MM:SS.

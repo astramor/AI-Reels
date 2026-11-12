@@ -10,6 +10,7 @@ whisper: true
 whisper_device: "cuda"
 no_cudnn: true
 whisper_language: "de"
+
 # --- Summarizer (Inhalt) ---
 summarizer_script: "srt_summarizer_local.py"
 summarizer_mode: "fast"
@@ -18,15 +19,15 @@ summarizer_timeout: 900
 strict_snap_tol: 8
 min_gap_sec: 12
 target_count: 6      # Wir wollen am Ende 6 Reels
-max_highlights: 8    # <--- ÄNDERUNG: Wir lassen nur 8 suchen (statt 16). 
-                     # Das erhöht die Dichte an "guten" Clips drastisch.
+max_highlights: 8    # 8 Highlights suchen
 fix_spelling: false
 llm_titles: true
+
 # --- Spans (Schnittpunkte & Titel) ---
 build_spans: true
 spans_script: "build_highlight_spans.py"
 span_min: 15
-span_max: 20
+span_max: 25
 title_min: 3
 title_max: 6
 end_boundary: "end"
@@ -39,7 +40,7 @@ nvenc: true
 reencode: true
 crf: 17
 preset: "slow"
-audio_bitrate: "320"
+audio_bitrate: "320k"
 export_srt: true
 
 # --- Audio & Optik ---
@@ -53,7 +54,6 @@ overlay_title: true
 overlay_fontsize: 40
 overlay_margin_top: 150
 subtitle_fontsize: 10
-# --- Untertitel Style (WICHTIG: Key hinzugefügt!) ---
 subtitle_style: "Fontname=Arial,Fontsize=6,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1.5,Shadow=0,MarginV=70,Alignment=2,Bold=1"
 
 # --- Face Tracking ---
@@ -70,14 +70,23 @@ face_use_pose_fallback: true
 face_keys: 200
 blur_bg: true
 
-# --- LLM Provider Auswahl ---
-llm_provider: "ollama"
-gemini_api_key: "0000"
-gemini_model: "gemini-2.5-pro"
-#ollama
-# Für Ollama
-llm_model: "qwen2.5:14b-instruct-q6_K"
-#qwen2.5:14b-instruct-q6_K
+# ==============================================================================
+# [TEST START: DEEPSEEK COLAB (OPENAI-API)] - ZUM RÜCKGÄNGIGMACHEN DIESEN BLOCK LÖSCHEN
+# ==============================================================================
+llm_provider: "openai"
+llm_model: "ds41"
+openai_base_url: "http://127.0.0.1:18080/v1"
+openai_api_key: ""
+
+# --- Vorheriges Produktiv-Setup (deaktiviert): ---
+# llm_provider: "ollama"
+# llm_model: "qwen2.5:14b-instruct-q6_K"
+# gemini_api_key: ""
+# gemini_model: "gemini-2.5-pro"
+# ==============================================================================
+# [TEST END: DEEPSEEK COLAB (OPENAI-API)]
+# ==============================================================================
+
 # --- Viral Style ---
 color_grade: true
 music_dir: "music"
