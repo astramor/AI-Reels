@@ -2,10 +2,37 @@
 # -*- coding: utf-8 -*-
 
 import json
+from datetime import timedelta
 from pathlib import Path
 from typing import List, Optional
 import srt
 from loguru import logger
+
+
+def filter_sermon_items(items, start_sec: float, end_sec: float):
+    """Keep only subtitles overlapping the requested sermon window.
+
+    Subtitles are clipped to the window so the exported SRT is valid and
+    contains only the processed sermon section.
+    """
+    filtered = []
+    for it, txt in items:
+        s = max(it.start.total_seconds(), start_sec)
+        e = min(it.end.total_seconds(), end_sec)
+        if e > s:
+            filtered.append(
+                (
+                    srt.Subtitle(
+                        index=len(filtered) + 1,
+                        start=timedelta(seconds=s),
+                        end=timedelta(seconds=e),
+                        content=txt,
+                    ),
+                    txt,
+                )
+            )
+    return filtered
+
 
 class SubtitleProcessor:
     """

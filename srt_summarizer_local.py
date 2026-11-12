@@ -20,10 +20,10 @@ Ausgaben:
 
 import argparse
 import json
+import math
 import pathlib
 import re
 import sys
-from datetime import timedelta
 
 import srt
 import yaml
@@ -41,6 +41,20 @@ from core.prompts import (
     GEMINI_PROMPT_MERGE,
 )
 from core.time_utils import parse_time_to_seconds, seconds_to_hms
+from domains.transcription.processor import filter_sermon_items
+
+
+_SERMON_TIME_RE = re.compile(r"\d+(?:\.\d+)?(?::\d+(?:\.\d+)?){0,2}")
+
+
+def _parse_sermon_boundary(value: str, label: str) -> float:
+    text = str(value).strip()
+    if not _SERMON_TIME_RE.fullmatch(text):
+        raise ValueError(f"Ungültige {label}: {value!r}")
+    parsed = parse_time_to_seconds(text)
+    if not math.isfinite(parsed) or parsed < 0:
+        raise ValueError(f"Ungültige {label}: {value!r}")
+    return parsed
 
 
 def srt_items(path):
@@ -101,31 +115,6 @@ def sanitize_highlights(text, items, tol=8):
     return out
 
 
-def filter_sermon_items(items, start_sec, end_sec):
-    """Keep only subtitles overlapping the requested sermon window.
-
-    Overlapping subtitles are clipped to the window so the exported SRT is
-    valid and contains only the processed sermon section.
-    """
-    filtered = []
-    for it, txt in items:
-        s = max(it.start.total_seconds(), start_sec)
-        e = min(it.end.total_seconds(), end_sec)
-        if e > s:
-            filtered.append(
-                (
-                    srt.Subtitle(
-                        index=len(filtered) + 1,
-                        start=timedelta(seconds=s),
-                        end=timedelta(seconds=e),
-                        content=it.content,
-                    ),
-                    txt,
-                )
-            )
-    return filtered
-
-
 def _map_model_to_provider_field(conf, provider, model):
     """Write the explicit model into the provider-specific config field."""
     if provider == "openrouter":
@@ -184,9 +173,9 @@ def run(args):
     t1 = items_all[-1][0].end.total_seconds()
 
     if args.sermon_start:
-        t0 = parse_time_to_seconds(args.sermon_start)
+        t0 = _parse_sermon_boundary(args.sermon_start, "sermon_start")
     if args.sermon_end:
-        t1 = parse_time_to_seconds(args.sermon_end)
+        t1 = _parse_sermon_boundary(args.sermon_end, "sermon_end")
 
     if t1 <= t0:
         raise ValueError(
